@@ -1,0 +1,49 @@
+{
+  "name": "pharo-agent",
+  "version": "0.1.0",
+  "description": "Local TypeScript coding agent for Pharo images, GGUF models, and terminal workflows.",
+  "type": "module",
+  "bin": {
+    "pharo-agent": "./pharo-agent/cli.ts"
+  },
+  "files": [
+    "pharo-agent",
+    "docs",
+    "examples",
+    "tests-ts",
+    "tests-e2e",
+    "README.md",
+    "CHANGELOG.md",
+    "SRC_TREE_SUMMARY.md",
+    "install.sh",
+    "scripts"
+  ],
+  "scripts": {
+    "test": "node --test tests-ts/*.test.ts",
+    "test:e2e": "node --test tests-e2e/*.test.ts",
+    "smoke": "printf '/exit\\n' | XDG_STATE_HOME=./.tmp-state node pharo-agent/cli.ts && node pharo-agent/cli.ts help && node pharo-agent/cli.ts tools && node pharo-agent/cli.ts model serve --hf Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:qwen2.5-coder-7b-instruct-q4_0-00001-of-00002.gguf --print-command",
+    "pack:dry-run": "npm pack --dry-run --json --cache ./.npm-cache",
+    "verify:release": "sh scripts/verify-release.sh",
+    "doctor": "node pharo-agent/cli.ts doctor"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "keywords": [
+    "pharo",
+    "smalltalk",
+    "agent",
+    "gguf",
+    "llama.cpp",
+    "typescript"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/pharo-llm/pharo-agent",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pharo-llm/pharo-agent.git"
+  }
+}

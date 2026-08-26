@@ -1,0 +1,18 @@
+{
+  "models": [
+    {
+      "id": "qwen-coder-7b",
+      "name": "Qwen Coder 7B",
+      "repoId": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "filename": "qwen2.5-coder-7b-instruct-q4_0-00001-of-00002.gguf",
+      "shards": [
+        "qwen2.5-coder-7b-instruct-q4_0-00001-of-00002.gguf",
+        "qwen2.5-coder-7b-instruct-q4_0-00002-of-00002.gguf"
+      ],
+      "publishRepo": "pharo-llm/pharo-agent",
+      "description": "Qwen2.5-Coder 7B Instruct Q4_0 split GGUF.",
+      "tags": ["default", "coding", "qwen", "7b", "gguf"],
+      "aliases": ["qwen2.5-coder-7b", "qwen-coder", "default"]
+    }
+  ]
+}

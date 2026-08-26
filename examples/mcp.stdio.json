@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "example": {
+      "command": "node",
+      "args": ["./tools/example-mcp-server.js"],
+      "env": {}
+    }
+  }
+}

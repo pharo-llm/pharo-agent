@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: npm test
+      - run: npm run smoke
+      - run: npm run pack:dry-run
+      - run: sh -n install.sh scripts/install.sh scripts/verify-release.sh
+
+  e2e:
+    name: Optional Pharo E2E
+    runs-on: macos-latest
+    env:
+      PHARO_VM: ${{ secrets.PHARO_VM }}
+      PHARO_IMAGE: ${{ secrets.PHARO_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: npm run test:e2e

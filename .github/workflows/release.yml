@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create, for example v0.1.0
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - run: npm run verify:release
+      - run: npm pack --json > pack.json
+      - name: Capture tarball name
+        run: node -e "const fs=require('fs'); const pack=JSON.parse(fs.readFileSync('pack.json','utf8'))[0]; fs.appendFileSync(process.env.GITHUB_ENV, 'TARBALL='+pack.filename+'\n')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pharo-agent-npm-package
+          path: ${{ env.TARBALL }}
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          gh release create "$tag" "$TARBALL" --generate-notes

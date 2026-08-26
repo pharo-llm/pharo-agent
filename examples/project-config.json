@@ -1,0 +1,10 @@
+{
+  "pharoVm": "/path/to/pharo",
+  "image": "./Pharo.image",
+  "modelRepo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+  "publishRepo": "pharo-llm/pharo-agent",
+  "modelFile": "qwen2.5-coder-7b-instruct-q4_0-00001-of-00002.gguf",
+  "permissionMode": "ask",
+  "allowOutsideWorkspace": false,
+  "allowPrivateNetwork": false
+}
