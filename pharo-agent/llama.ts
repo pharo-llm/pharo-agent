@@ -15,8 +15,8 @@ export type RunningServer = {
 
 export class LlamaError extends Error {}
 
-export async function buildLlamaCommand(config: AgentConfig, options: { modelPath?: string; hfRef?: string } = {}): Promise<string[]> {
-  const server = await effectiveLlamaServer(config)
+export async function buildLlamaCommand(config: AgentConfig, options: { modelPath?: string; hfRef?: string; allowMissingServer?: boolean } = {}): Promise<string[]> {
+  const server = await effectiveLlamaServer(config) ?? (options.allowMissingServer ? 'llama-server' : undefined)
   if (!server) throw new LlamaError('llama-server was not found. Install llama.cpp or set PHARO_AGENT_LLAMA_SERVER.')
   const command = path.basename(server) === 'llama' ? [server, 'serve'] : [server]
   if (options.hfRef) command.push('-hf', options.hfRef)

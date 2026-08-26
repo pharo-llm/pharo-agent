@@ -422,7 +422,7 @@ async function modelCommand(args: string[], global: GlobalOptions): Promise<numb
       const ref = resolveModelRef(refValue, config.modelRepo)
       modelPath = (await downloadGgufSet(await selectGguf(ref.repoId, ref.selector ?? config.modelFile), config)).primary
     } else if (!modelPath) modelPath = await configuredOrDownloadedModel(config)
-    const command = await buildLlamaCommand(config, { modelPath, hfRef })
+    const command = await buildLlamaCommand(config, { modelPath, hfRef, allowMissingServer: Boolean(flags['print-command']) })
     if (flags['print-command']) {
       process.stdout.write(`${command.join(' ')}\n`)
       return 0
