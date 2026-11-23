@@ -20,6 +20,7 @@ export function defaultConfig(): AgentConfig {
     baseUrl: defaultBaseUrl,
     llamaPort: 8080,
     maxIterations: 12,
+    maxOutputTokens: 4096,
     temperature: 0.2,
     permissionMode: 'ask',
     allowOutsideWorkspace: false,
@@ -138,6 +139,7 @@ function envConfig(): Partial<AgentConfig> {
   if (process.env.PHARO_AGENT_LIVE_PORT) env.livePort = Number(process.env.PHARO_AGENT_LIVE_PORT)
   if (process.env.PHARO_AGENT_TIMEOUT) env.timeoutSeconds = Number(process.env.PHARO_AGENT_TIMEOUT)
   if (process.env.PHARO_AGENT_MAX_ITERATIONS) env.maxIterations = Number(process.env.PHARO_AGENT_MAX_ITERATIONS)
+  if (process.env.PHARO_AGENT_MAX_OUTPUT_TOKENS) env.maxOutputTokens = Number(process.env.PHARO_AGENT_MAX_OUTPUT_TOKENS)
   if (process.env.PHARO_AGENT_LLAMA_PORT) env.llamaPort = Number(process.env.PHARO_AGENT_LLAMA_PORT)
   if (process.env.PHARO_AGENT_TEMPERATURE) env.temperature = Number(process.env.PHARO_AGENT_TEMPERATURE)
   if (process.env.PHARO_AGENT_PERMISSION_MODE) env.permissionMode = process.env.PHARO_AGENT_PERMISSION_MODE as PermissionMode

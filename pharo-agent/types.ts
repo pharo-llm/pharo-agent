@@ -66,6 +66,8 @@ export type AgentConfig = {
   llamaServer?: string
   llamaPort: number
   maxIterations: number
+  /** Cap on each model reply, so a runaway generation cannot hang a turn. */
+  maxOutputTokens: number
   temperature: number
   permissionMode: PermissionMode
   allowOutsideWorkspace: boolean
@@ -76,6 +78,9 @@ export type AgentConfig = {
   memoryFile?: string
   /** Start llama.cpp automatically when the model server is down and a GGUF is configured. */
   autoStartModel: boolean
+  /** Pharo Cloud (hosted models): its URL and this machine's client ID (not a secret). */
+  cloudUrl?: string
+  cloudClientId?: string
   /** Set once setup has run, so the first `pharo-agent` run starts it. */
   onboarded?: boolean
   /** Folders the user trusted. Only read from the global config. */

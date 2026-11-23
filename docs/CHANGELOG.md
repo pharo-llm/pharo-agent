@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Pharo Cloud (hosted models, served by vLLM). It is the first model choice in
+  setup. There is no login: the machine registers with a SHA-256 of its machine id
+  and gets a client ID, sent with every request.
+  `pharo-agent cloud status|usage|connect|disconnect`, `/usage` with session and week
+  meters, the banner shows quota, and limit or block messages are shown as is. If
+  the cloud loses this machine, it re-registers once and retries.
+- The chat footer shows the tokens each turn used.
+
 - First-run setup, Claude Code style: trust the folder, then pick the model
   (finds Ollama / llama.cpp / LM Studio), permissions, MCP (off, project
   `.mcp.json`, or Evref-BL PLexus), image and VM. Arrow-key menus. Runs from the

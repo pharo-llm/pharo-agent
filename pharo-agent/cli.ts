@@ -3,8 +3,9 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import type { AgentConfig, ChatMessage, PermissionMode } from './types.ts'
-import { effectivePharoVm, globalConfigPath, loadConfig, mergeConfig, modelCacheDir, pharoModeValue, updateConfigFile } from './config.ts'
+import { defaultBaseUrl, effectivePharoVm, globalConfigPath, loadConfig, mergeConfig, modelCacheDir, pharoModeValue, updateConfigFile } from './config.ts'
 import { AgentInterrupted, PharoAgentLoop } from './agent.ts'
+import { LlmError } from './llm.ts'
 import { evaluateSmalltalk, inspectImage, runSmalltalkFile, runSUnit } from './pharo.ts'
 import type { PharoEvalResult, PharoRunResult } from './pharo.ts'
 import { liveEndpoint, liveEval, liveHealth, liveLoadSnippet, liveSave, liveServerScriptPath, nextLivePort, samePath, startLiveImage } from './live.ts'
@@ -24,7 +25,9 @@ import { addTask, clearCompletedTasks, readTasks, updateTask } from './task-stor
 import { collectDiagnostics, diagnosticsOk } from './diagnostics.ts'
 import { discoverSetup } from './setup.ts'
 import { VERSION } from './version.ts'
-import { askTrust, isCwdTrusted, runSetup, SetupDeclined, terminalIo } from './onboarding.ts'
+import { askTrust, connectCloud, isCwdTrusted, runSetup, SetupDeclined, terminalIo } from './onboarding.ts'
+import { cloudStatus, cloudUsage, DEFAULT_CLOUD_URL, isCloud, resetIn, usageSummary } from './cloud.ts'
+import type { CloudUsage } from './cloud.ts'
 import type { SetupIo } from './onboarding.ts'
 import { PromptCancelled } from './prompts.ts'
 import { findModelPreset, formatModelPreset, loadModelPresets, modelReference, modelShardFiles, type ModelPreset } from './models.ts'
@@ -66,6 +69,8 @@ const commands: Record<string, CommandFn> = {
   memory: memoryCommand,
   sessions: sessionsCommand,
   live: liveCommand,
+  cloud: cloudCommand,
+  usage: (args, global) => cloudCommand(['usage', ...args], global),
   images: imagesCommand,
   image: imagesCommand,
   version: versionCommand,
@@ -668,6 +673,75 @@ async function autoStartModel(config: AgentConfig): Promise<Awaited<ReturnType<t
   }
 }
 
+
+/** `pharo-agent cloud [status|usage|connect [url]|disconnect]` (and /cloud, /usage in the chat). */
+async function cloudCommand(args: string[], global: GlobalOptions, sessionConfig?: AgentConfig): Promise<number> {
+  const sub = args.shift() ?? 'status'
+  const { positional } = parseFlags(args)
+  const config = sessionConfig ?? await loadConfig({ configPath: global.configPath, cwd: global.cwd })
+  const file = global.configPath ?? globalConfigPath()
+  const out = (text: string) => process.stdout.write(text)
+  if (sub === 'connect') {
+    const url = (positional[0] ?? config.cloudUrl ?? DEFAULT_CLOUD_URL).replace(/\/$/, '')
+    const io: SetupIo = { ...terminalIo, select: async (_title, choices, initial = 0) => choices[initial]!.value }
+    await connectCloud(url, io, values => updateConfigFile(file, values))
+    if (sessionConfig) Object.assign(sessionConfig, await loadConfig({ configPath: global.configPath, cwd: global.cwd }))
+    return 0
+  }
+  if (sub === 'disconnect') {
+    await updateConfigFile(file, { cloudUrl: null, cloudClientId: null, baseUrl: null, model: null })
+    if (sessionConfig) Object.assign(sessionConfig, { cloudUrl: undefined, cloudClientId: undefined, baseUrl: defaultBaseUrl, model: undefined })
+    out('Disconnected from Pharo Cloud. Pick another model with pharo-agent setup.\n')
+    return 0
+  }
+  if (!config.cloudUrl || !config.cloudClientId) {
+    out(`Pharo Cloud is not set up. Connect: pharo-agent cloud connect ${DEFAULT_CLOUD_URL}  (or choose it in pharo-agent setup)\n`)
+    return 1
+  }
+  if (sub === 'status') {
+    const status = await cloudStatus(config.cloudUrl)
+    out(`${style.bold('Pharo Cloud')} ${status?.ok ? style.green('● online') : status ? style.yellow('● degraded') : style.red('○ unreachable')} ${style.dim(config.cloudUrl)}\n`)
+    out(`  machine   ${config.cloudClientId}${isCloud(config) ? '' : style.yellow('  (not the current model provider: pharo-agent cloud connect)')}\n`)
+    if (status) {
+      out(`  models    ${status.models.join(', ') || 'none ready'}\n`)
+      out(`  engines   ${status.engines?.healthy ?? 0}/${status.engines?.total ?? 0} healthy · ${status.queue?.running ?? 0} running, ${status.queue?.waiting ?? 0} waiting\n`)
+    }
+  }
+  if (sub === 'status' || sub === 'usage') {
+    try {
+      printUsage(await cloudUsage(config))
+    } catch (error) {
+      out(`${style.red('error:')} ${(error as Error).message}\n`)
+      return 1
+    }
+    return 0
+  }
+  throw new Error('Usage: pharo-agent cloud [status|usage|connect [url]|disconnect]')
+}
+
+function printUsage(usage: CloudUsage): void {
+  const out = (text: string) => process.stdout.write(text)
+  const bar = (used: number, limit: number | null) => {
+    if (!limit) return style.dim('no limit'.padEnd(20))
+    const share = Math.min(1, used / limit)
+    const filled = Math.round(share * 20)
+    const paint = share >= 0.9 ? style.red : share >= 0.75 ? style.yellow : style.blue
+    return `${paint('█'.repeat(filled))}${style.dim('░'.repeat(20 - filled))}`
+  }
+  const line = (label: string, used: number, limit: number | null, reset: string) =>
+    out(`  ${label.padEnd(16)}${bar(used, limit)} ${limit ? `${String(Math.round((used / limit) * 100)).padStart(3)}%` : '    '}  ${used.toLocaleString('en-US')}${limit ? ` / ${limit.toLocaleString('en-US')}` : ''} tokens ${style.dim(`· ${reset}`)}\n`)
+  out(`\n${style.bold('Usage')} ${style.dim(`· ${usage.planLabel} plan${usage.status === 'blocked' ? ' · BLOCKED by the administrator' : ''}`)}\n`)
+  line(`${usage.session.hours}-hour session`, usage.session.used, usage.session.limit, usage.session.active ? resetIn(usage.session.resetsAt) : 'starts with your next request')
+  line('Week', usage.week.used, usage.week.limit, usage.week.resetsAt ? resetIn(usage.week.resetsAt) : 'rolling 7 days')
+  out(`  ${'Requests'.padEnd(16)}${usage.minute.used} / ${usage.minute.limit ?? '∞'} per minute · ${usage.concurrent.used} / ${usage.concurrent.limit ?? '∞'} at once${usage.maxTokensPerRequest ? ` · up to ${usage.maxTokensPerRequest.toLocaleString('en-US')} tokens per answer` : ''}\n`)
+  if (usage.last7Days?.length) {
+    const max = Math.max(1, ...usage.last7Days.map(day => day.tokens))
+    const ticks = '▁▂▃▄▅▆▇█'
+    out(`  ${'Last 7 days'.padEnd(16)}${style.blue(usage.last7Days.map(day => (day.tokens ? ticks[Math.min(7, Math.floor((day.tokens / max) * 7.999))] : ' ')).join(''))} ${style.dim(`${usage.last7Days.reduce((sum, day) => sum + day.tokens, 0).toLocaleString('en-US')} tokens`)}\n`)
+  }
+  out('\n')
+}
+
 async function liveCommand(args: string[], global: GlobalOptions, sessionConfig?: AgentConfig): Promise<number> {
   const sub = args.shift() ?? 'status'
   const { flags } = parseFlags(args)
@@ -1004,6 +1078,7 @@ Usage:
   pharo-agent status [--online]
   pharo-agent configure [--pharo-vm PATH] [--image IMAGE] [--model PATH_OR_REF]
   pharo-agent doctor [--online]
+  pharo-agent cloud [status|usage|connect [url]|disconnect]
   pharo-agent images [list [--all]|where|use|info|templates|create|copy|delete|start|stop|vms|vm download]
   pharo-agent live [status|start|snippet|stop|save]
   pharo-agent eval "Smalltalk code"
@@ -1133,6 +1208,7 @@ async function runChatTurn(prompt: string, state: ChatState, global: GlobalOptio
   state.turn = controller
   const started = Date.now()
   state.renderer.toolCalls = 0
+  state.renderer.tokens = 0
   process.stdout.write('\n')
   try {
     const result = await state.loop.runTurn(prompt, {
@@ -1153,11 +1229,15 @@ async function runChatTurn(prompt: string, state: ChatState, global: GlobalOptio
     state.renderer.stop()
     state.history = trimChatHistory(result.messages)
     process.stdout.write(`${style.bold('●')} ${renderMarkdown(result.answer)}\n`)
-    process.stdout.write(style.dim(`  ${formatDuration(Date.now() - started)} · ${state.renderer.toolCalls} tool call${state.renderer.toolCalls === 1 ? '' : 's'}\n\n`))
+    const tokens = state.renderer.tokens ? ` · ${state.renderer.tokens >= 10_000 ? `${(state.renderer.tokens / 1000).toFixed(1)}k` : state.renderer.tokens.toLocaleString('en-US')} tokens` : ''
+    process.stdout.write(style.dim(`  ${formatDuration(Date.now() - started)} · ${state.renderer.toolCalls} tool call${state.renderer.toolCalls === 1 ? '' : 's'}${tokens}\n\n`))
   } catch (error) {
     state.renderer.stop()
     if (controller.signal.aborted || error instanceof AgentInterrupted) {
       process.stdout.write(`  ${style.gray('⎿')}  ${style.yellow('Interrupted.')} ${style.dim('What should the agent do instead?')}\n\n`)
+    } else if (error instanceof LlmError && (error.status === 429 || error.status === 403)) {
+      // A usage limit (or a block) is not a setup problem: say it plainly.
+      process.stdout.write(`\n${style.yellow('●')} ${error.message}\n${style.dim('  /usage shows your usage and when it resets.')}\n\n`)
     } else {
       process.stdout.write(`\n${style.red('error:')} ${(error as Error).message}\n`)
       process.stdout.write(style.dim('Run /status for setup checks, /model current for model config, or /help for chat commands.\n\n'))
@@ -1315,6 +1395,12 @@ async function handleChatSlash(prompt: string, global: GlobalOptions, state: Cha
     state.imageListing = session.listing
     return true
   }
+  if (command === 'usage') return await cloudCommand(['usage'], global, state.config).then(() => true)
+  if (command === 'cloud') {
+    await cloudCommand(rest.length ? rest : ['status'], global, state.config).catch(error => process.stdout.write(`${style.red('error:')} ${(error as Error).message}\n`))
+    if (rest[0] === 'connect' || rest[0] === 'disconnect') state.loop = new PharoAgentLoop(state.config)
+    return true
+  }
   if (command === 'live') return await liveCommand(rest.length ? rest : ['status'], global, state.config).then(() => true)
   if (command === 'save') return await liveCommand(['save'], global, state.config).then(() => true)
   if (command === 'sessions') return await sessionsCommand(rest.length ? rest : ['list']).then(() => true)
@@ -1395,11 +1481,17 @@ async function printChatWelcome(config: AgentConfig, cwd: string): Promise<void>
     const count = (await listLauncherImages(locations)).length
     pharo = { kind: 'none', detail: count ? `/image to pick one of your ${count} images` : '/image create to make one' }
   }
+  let provider: string | undefined
+  if (isCloud(config)) {
+    const usage = await cloudUsage(config, 1_500).catch(() => undefined)
+    provider = usage ? `Pharo Cloud · ${usageSummary(usage)}` : 'Pharo Cloud'
+  }
   const lines = bannerLines({
     version: VERSION,
     model: config.model ?? config.modelFile ?? (config.modelPath ? path.basename(config.modelPath) : 'default model'),
     modelStatus: modelReady ? 'ready' : 'offline',
     modelUrl: config.baseUrl,
+    provider,
     pharo,
     cwd,
     permissionMode: config.permissionMode,
@@ -1424,6 +1516,9 @@ ${row('/image copy|delete <#>', 'Duplicate / remove an image')}
 ${row('/image info [#]', 'Path, version, VM, state')}
 ${row('/templates [filter]', 'Available templates')}
 ${row('/vms', 'Installed VMs')}
+${style.bold('Pharo Cloud')}
+${row('/usage', 'Your 5-hour session and weekly usage, and when they reset')}
+${row('/cloud [status|connect|disconnect]', '')}
 ${style.bold('Live connection')}
 ${row('/live [status|snippet|stop]', 'Connect an image you opened yourself')}
 ${row('/save', 'Save the live image')}

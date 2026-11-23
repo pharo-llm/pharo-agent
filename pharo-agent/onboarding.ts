@@ -24,6 +24,7 @@ import {
 import type { PharoImage } from './launcher.ts'
 import { describeVersion, imageStatuses, selectImage, startPharoImage } from './image-manager.ts'
 import { projectMcpFiles, readMcpFile } from './mcp.ts'
+import { CloudError, cloudStatus, DEFAULT_CLOUD_URL, registerMachine } from './cloud.ts'
 import { pathExists, writeJsonFile, xdgConfigDir } from './platform.ts'
 
 /** How setup asks: arrow-key menus in a terminal, numbered questions inside the chat. */
@@ -123,7 +124,7 @@ export async function runSetup(options: SetupOptions): Promise<AgentConfig> {
   await save({ onboarded: true })
   config = await loadConfig({ configPath: options.configPath, cwd: options.cwd })
   io.write(`\n${style.green('✓')} ${style.bold('Setup complete')} ${style.dim(`· saved in ${tildify(file)}`)}\n`)
-  io.write(`  model        ${config.model ?? config.modelFile ?? 'none'} ${style.dim(config.baseUrl)}\n`)
+  io.write(`  model        ${config.model ?? config.modelFile ?? 'none'} ${style.dim(config.cloudClientId && config.cloudUrl && config.baseUrl.startsWith(config.cloudUrl) ? `Pharo Cloud · ${config.cloudUrl}` : config.baseUrl)}\n`)
   io.write(`  permissions  ${config.permissionMode}\n`)
   io.write(`  MCP          ${config.mcpEnabled === false ? 'off' : config.mcpConfig ? tildify(config.mcpConfig) : 'project .mcp.json when present'}\n`)
   io.write(`  image        ${config.image ? tildify(config.image) : 'none yet (/image)'}\n`)
@@ -135,6 +136,7 @@ export async function runSetup(options: SetupOptions): Promise<AgentConfig> {
 // Model
 
 type ModelChoice =
+  | { kind: 'cloud' }
   | { kind: 'server'; baseUrl: string; model: string }
   | { kind: 'download' }
   | { kind: 'url' }
@@ -173,9 +175,17 @@ function serverName(baseUrl: string): string {
 }
 
 async function modelStep(config: AgentConfig, io: SetupIo, save: (values: ConfigUpdates) => Promise<unknown>, options: SetupOptions): Promise<void> {
-  io.write(`\n${style.dim('Looking for model servers (Ollama, llama.cpp, LM Studio)…')}\n`)
-  const servers = await detectModelServers([config.baseUrl])
-  const choices: Choice<ModelChoice>[] = []
+  io.write(`\n${style.dim('Looking for Pharo Cloud and local model servers (Ollama, llama.cpp, LM Studio)…')}\n`)
+  const cloudUrl = config.cloudUrl ?? DEFAULT_CLOUD_URL
+  const [servers, cloud] = await Promise.all([
+    detectModelServers([config.baseUrl].filter(url => !url.startsWith(cloudUrl))),
+    cloudStatus(cloudUrl),
+  ])
+  const choices: Choice<ModelChoice>[] = [{
+    label: 'Pharo Cloud',
+    value: { kind: 'cloud' },
+    hint: cloud?.ok ? `hosted ${cloud.defaultModel ?? 'model'}, nothing to install · no login` : `hosted models · not reachable at ${cloudUrl} right now`,
+  }]
   for (const server of servers) {
     // Embedding models (nomic-embed-text, …) cannot chat: don't offer them.
     for (const model of server.models.filter(id => !/embed/i.test(id)).slice(0, 8)) choices.push({ label: model, value: { kind: 'server', baseUrl: server.baseUrl, model }, hint: `${server.name} · running` })
@@ -187,8 +197,10 @@ async function modelStep(config: AgentConfig, io: SetupIo, save: (values: Config
   if (!servers.length) io.write(style.yellow(`No running model server found.${llama ? '' : ' Install Ollama (ollama.com) or llama.cpp, or enter a server URL.'}\n`))
   const current = choices.findIndex(choice => choice.value.kind === 'server' && choice.value.model === config.model && choice.value.baseUrl === config.baseUrl)
   const picked = await io.select('Which model should the agent use?', choices, current >= 0 ? current : 0)
-  if (picked.kind === 'server') {
-    await save({ baseUrl: picked.baseUrl, model: picked.model, modelPath: null })
+  if (picked.kind === 'cloud') {
+    await connectCloud(cloud?.ok ? cloudUrl : (await io.ask('Pharo Cloud address', cloudUrl)).replace(/\/$/, ''), io, save)
+  } else if (picked.kind === 'server') {
+    await save({ baseUrl: picked.baseUrl, model: picked.model, modelPath: null, cloudUrl: null, cloudClientId: null })
   } else if (picked.kind === 'download') {
     if (options.downloadDefaultModel) await options.downloadDefaultModel()
     await save({ baseUrl: `http://127.0.0.1:${config.llamaPort}/v1`, autoStartModel: true })
@@ -317,4 +329,20 @@ async function vmStep(image: PharoImage, io: SetupIo): Promise<string | undefine
     return undefined
   }
   return picked.kind === 'vm' ? picked.path : undefined
+}
+
+/** Register this machine with Pharo Cloud and make it the model provider. */
+export async function connectCloud(url: string, io: SetupIo, save: (values: ConfigUpdates) => Promise<unknown>): Promise<void> {
+  const status = await cloudStatus(url, 5_000)
+  if (!status) throw new CloudError(`Pharo Cloud is not reachable at ${url}. Check the address, or pick a local model for now.`)
+  const registered = await registerMachine(url)
+  let model = registered.defaultModel ?? status.defaultModel ?? status.models[0]
+  if (status.models.length > 1) model = await io.select('Which Pharo Cloud model?', status.models.map(id => ({ label: id, value: id, hint: id === model ? 'default' : undefined })), Math.max(0, status.models.indexOf(model ?? '')))
+  await save({ cloudUrl: url, cloudClientId: registered.clientId, baseUrl: `${url}/v1`, model: model ?? undefined, modelPath: null, apiKey: null })
+  const usage = registered.usage
+  const limits = [
+    usage.session.limit ? `${usage.session.limit.toLocaleString('en-US')} tokens per ${usage.session.hours}h session` : undefined,
+    usage.week.limit ? `${usage.week.limit.toLocaleString('en-US')} per week` : undefined,
+  ].filter(Boolean).join(', ')
+  io.write(`${style.green('✓')} Connected to Pharo Cloud ${style.dim(`· ${usage.planLabel} plan${limits ? `: ${limits}` : ''} · machine ${registered.clientId}`)}\n`)
 }

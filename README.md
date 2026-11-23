@@ -12,7 +12,9 @@ tests. You see every step as it happens.
   test result and shell command, with where it ran and how long it took.
 - **You can do the same yourself.** `> 3 factorial` evaluates Smalltalk and
   `! git status` runs a shell command. Esc interrupts.
-- **Runs on local models** (llama.cpp, Ollama, any OpenAI-compatible server).
+- **Runs on Pharo Cloud or on local models.** Pharo Cloud is the hosted option:
+  no login, and usage limits like Claude's (`/usage`). Local models work through
+  llama.cpp, Ollama, or any OpenAI-compatible server.
 
 ## Install
 
@@ -35,7 +37,8 @@ Requires Node.js 22.6 or newer. There are no npm dependencies.
 Setup asks a few questions, with arrow keys or numbers, the way Claude Code does:
 
 1. **Trust this folder?** The agent only works in folders you trust.
-2. **Which model?** It finds running Ollama, llama.cpp and LM Studio models, or
+2. **Which model?** **Pharo Cloud** (hosted, nothing to install, no login), or a
+   local model: it finds running Ollama, llama.cpp and LM Studio models, or
    downloads one and starts it automatically when needed.
 3. **How much to ask?** Approve every change, auto-approve, or read-only.
 4. **MCP or not?** None (the Pharo tools don't need it), your project's
@@ -64,6 +67,7 @@ Run `pharo-agent setup` (or `/setup` in the chat) to change your answers.
 | `/images` · `/templates` · `/vms` | list images (`--all`: whole machine), templates, VMs |
 | `> code` | evaluate Smalltalk in the image yourself |
 | `! command` | run a shell command yourself |
+| `/usage` | your Pharo Cloud usage: 5-hour session, week, reset times |
 | `/verbose` | show full tool output |
 | `/help` | everything else (models, permissions, sessions, …) |
 

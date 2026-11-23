@@ -33,7 +33,9 @@ no npm dependencies) and one Smalltalk script that it loads into Pharo images.
 1. **You type a question.** `cli.ts` (chat mode) hands it to `PharoAgentLoop.runTurn`.
    If the model server is down but a GGUF is configured, llama.cpp is started first.
 2. **The agent loop** (`agent.ts`) sends the conversation, the system prompt and
-   the tool schemas to the model (`llm.ts`).
+   the tool schemas to the model (`llm.ts`): Pharo Cloud or a local server. Pharo
+   Cloud requests carry this machine's client ID. A usage-limit answer is shown
+   as is, with its reset time.
 3. **The model answers** with tool calls, either native `tool_calls` or JSON in
    the text (a fallback for GGUF models without function calling).
 4. **Each tool runs** (`tools.ts`) after a permission check (`permissions.ts`).
@@ -59,6 +61,7 @@ and run afterwards.
 | Pharo code | `pharo.ts`, `live.ts`, `smalltalk/live-server.st` | Run Smalltalk live or headless, with the same result shape |
 | Pharo images | `launcher.ts`, `image-manager.ts`, `ston.ts` | Pharo Launcher's images, VMs and templates, plus start/stop/select |
 | Models | `models.ts`, `hf.ts`, `llama.ts`, `model-presets.json` | GGUF presets, Hugging Face downloads, llama.cpp server |
+| Pharo Cloud | `cloud.ts` | Machine registration (hashed fingerprint, no login), client ID header, usage (`/usage`, banner) |
 | State | `config.ts`, `sessions.ts`, `memory.ts`, `task-store.ts` | Config (global, project, env), transcripts, project memory, tasks |
 | Support | `platform.ts`, `workspace.ts`, `safety.ts`, `setup.ts`, `diagnostics.ts` | Paths and processes, workspace scanning, path guards, `setup`, `doctor` |
 

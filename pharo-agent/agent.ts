@@ -1,5 +1,6 @@
 import type { AgentConfig, AgentTool, ChatMessage, JsonObject, ToolCall, ToolResult } from './types.ts'
 import { OpenAICompatibleClient } from './llm.ts'
+import { cloudHeaders, isCloud, registerMachine } from './cloud.ts'
 import type { ChatResponse } from './llm.ts'
 import { builtInTools } from './tools.ts'
 import { workspaceContext } from './workspace.ts'
@@ -19,7 +20,7 @@ export class AgentInterrupted extends Error {
 /** Everything the loop does, as it happens, so a UI can show it. */
 export type AgentEvent = (
   | { type: 'model_start'; iteration: number }
-  | { type: 'model_end'; iteration: number; durationMs: number }
+  | { type: 'model_end'; iteration: number; durationMs: number; tokens?: number }
   | { type: 'assistant_text'; text: string }
   | { type: 'tool_start'; call: ToolCall; tool?: AgentTool }
   | { type: 'tool_end'; call: ToolCall; result: ToolResult; durationMs: number }
@@ -68,7 +69,14 @@ export class PharoAgentLoop {
 
   constructor(config: AgentConfig, tools = builtInTools(), client?: AgentLlmClient) {
     this.config = config
-    this.client = client ?? new OpenAICompatibleClient(config.baseUrl, config.apiKey, config.timeoutSeconds * 1_000)
+    this.client = client ?? new OpenAICompatibleClient(config.baseUrl, config.apiKey, config.timeoutSeconds * 1_000, {
+      headers: cloudHeaders(config),
+      reregister: isCloud(config) ? async () => {
+        const registered = await registerMachine(config.cloudUrl!)
+        config.cloudClientId = registered.clientId
+        return { 'x-pharo-client-id': registered.clientId }
+      } : undefined,
+    })
     this.tools = tools
   }
 
@@ -95,20 +103,21 @@ export class PharoAgentLoop {
       checkAborted()
       emit({ type: 'model_start', iteration })
       const started = Date.now()
-      let response: ChatResponse
+      let response: ChatResponse | undefined
       try {
         response = await this.client.chat({
           model,
           messages,
           tools: this.tools,
           temperature: this.config.temperature,
+          maxTokens: this.config.maxOutputTokens,
           signal: options.signal,
         })
       } catch (error) {
         if (options.signal?.aborted) throw new AgentInterrupted()
         throw error
       } finally {
-        emit({ type: 'model_end', iteration, durationMs: Date.now() - started })
+        emit({ type: 'model_end', iteration, durationMs: Date.now() - started, tokens: response?.usage ? response.usage.promptTokens + response.usage.completionTokens : undefined })
       }
       // Reasoning models may wrap their thinking in <think> tags: it is not an answer.
       const content = response.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim()

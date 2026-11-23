@@ -81,6 +81,8 @@ export type BannerInfo = {
   model: string
   modelStatus: 'ready' | 'offline' | 'unknown'
   modelUrl: string
+  /** Shown instead of the URL, e.g. "Pharo Cloud · 12% of 5h session". */
+  provider?: string
   /** The image questions go to: live (agent server answering), stopped, or none selected. */
   pharo: { kind: 'live' | 'stopped' | 'none'; name?: string; version?: string; detail?: string }
   cwd: string
@@ -89,7 +91,8 @@ export type BannerInfo = {
 
 export function bannerLines(info: BannerInfo): string[] {
   const dot = (ok: boolean) => (ok ? style.green('●') : style.red('○'))
-  const modelLine = `${info.model} ${style.dim('·')} ${dot(info.modelStatus === 'ready')} ${style.dim(info.modelStatus === 'ready' ? shortUrl(info.modelUrl) : `no model server at ${shortUrl(info.modelUrl)}`)}`
+  const where = info.provider ?? shortUrl(info.modelUrl)
+  const modelLine = `${info.model} ${style.dim('·')} ${dot(info.modelStatus === 'ready')} ${style.dim(info.modelStatus === 'ready' ? where : `${info.provider ? `${info.provider} unreachable` : `no model server at ${shortUrl(info.modelUrl)}`}`)}`
   const pharo = info.pharo
   const pharoLine = pharo.kind === 'none'
     ? `Pharo ${style.dim('·')} ${style.yellow('○ no image selected')} ${style.dim(`· ${pharo.detail ?? '/image'}`)}`
@@ -364,6 +367,8 @@ export class ActivityRenderer {
   private readonly spinner = new Spinner()
   private readonly options: RenderOptions
   toolCalls = 0
+  /** Tokens the model reported this turn (prompt + completion of every call). */
+  tokens = 0
 
   constructor(options: RenderOptions) {
     this.options = options
@@ -377,6 +382,7 @@ export class ActivityRenderer {
         break
       case 'model_end':
         this.spinner.stop()
+        this.tokens += event.tokens ?? 0
         break
       case 'assistant_text':
         this.spinner.stop()
