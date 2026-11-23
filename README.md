@@ -4,6 +4,12 @@ A local coding agent for Pharo, in your terminal. Ask questions and it works
 directly inside your Pharo image: it browses classes, writes methods, and runs
 tests. You see every step as it happens.
 
+![pharo-agent picking a Pharo image, starting it, and building a class with its test](docs/media/demo.gif)
+
+<sub>A real, unscripted session with a small local model (`qwen3:4b`) on a live
+Pharo 14 image. The model's thinking time is shortened in the video; the spinner
+shows the real seconds. [MP4 version](docs/media/demo.mp4)</sub>
+
 - **Works inside your running image.** No MCP: a tiny server loads into the
   image, so changes stay and calls take milliseconds.
 - **Manages your images like Pharo Launcher.** It uses the same images, VMs and
@@ -94,27 +100,4 @@ into its Playground. That connects it to the agent.
 Read-only tools run freely. Tools that change things (compile, define a class,
 eval, write files, shell) ask first: answer `y`, `n`, or `a` (always, for this
 session). The agent won't redefine existing classes from other packages, and the
-in-image server only accepts local connections that carry a secret token. See
-[docs/SECURITY.md](docs/SECURITY.md).
-
-## Docs
-
-- [Getting started](docs/GETTING_STARTED.md)
-- [Architecture](docs/ARCHITECTURE.md): how the pieces fit together
-- [Pharo: images, live mode, tools](docs/PHARO.md)
-- [Models: download, serve, publish](docs/MODELS.md)
-- [Security](docs/SECURITY.md)
-- [Releases](docs/RELEASE.md) · [Changelog](docs/CHANGELOG.md)
-
-## Development
-
-```text
-pharo-agent/   the CLI source       docs/      all documentation
-scripts/       install & checks     tests/     unit/ and e2e/
-```
-
-```sh
-npm test                                              # unit tests
-PHARO_VM=… PHARO_IMAGE=… npm run test:e2e             # against a real image
-npm run verify:release                                # everything CI checks
-```
+in-image server only accepts local connections that carry a secret token.
