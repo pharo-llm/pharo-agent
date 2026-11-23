@@ -4,10 +4,26 @@ import type { ChatResponse } from './llm.ts'
 import { builtInTools } from './tools.ts'
 import { workspaceContext } from './workspace.ts'
 import { approveTool } from './permissions.ts'
+import type { Prompter } from './permissions.ts'
 import { readMemory } from './memory.ts'
 import { SessionRecorder } from './sessions.ts'
 
 export class AgentLoopError extends Error {}
+
+export class AgentInterrupted extends Error {
+  constructor() {
+    super('Interrupted')
+  }
+}
+
+/** Everything the loop does, as it happens, so a UI can show it. */
+export type AgentEvent = (
+  | { type: 'model_start'; iteration: number }
+  | { type: 'model_end'; iteration: number; durationMs: number }
+  | { type: 'assistant_text'; text: string }
+  | { type: 'tool_start'; call: ToolCall; tool?: AgentTool }
+  | { type: 'tool_end'; call: ToolCall; result: ToolResult; durationMs: number }
+) & { depth?: number }
 
 export type AgentRunOptions = {
   cwd?: string
@@ -15,7 +31,13 @@ export type AgentRunOptions = {
   resumeMessages?: ChatMessage[]
   recorder?: SessionRecorder
   signal?: AbortSignal
+  onEvent?: (event: AgentEvent) => void
+  /** Ask the human (approvals). Defaults to a private readline on stdin. */
+  prompt?: Prompter
 }
+
+/** Keep one huge tool result from flooding a small local model's context. */
+const maxToolResultChars = 24_000
 
 export type AgentTurnResult = {
   answer: string
@@ -30,6 +52,7 @@ export type AgentLlmClient = {
     tools?: AgentTool[]
     temperature?: number
     maxTokens?: number
+    signal?: AbortSignal
   }): Promise<ChatResponse>
 }
 
@@ -37,6 +60,8 @@ export class PharoAgentLoop {
   private config: AgentConfig
   private client: AgentLlmClient
   private tools: AgentTool[]
+  /** Tools the user approved with "always" during this loop's lifetime. */
+  readonly sessionAllowed = new Set<string>()
 
   constructor(config: AgentConfig, tools = builtInTools(), client?: AgentLlmClient) {
     this.config = config
@@ -58,13 +83,29 @@ export class PharoAgentLoop {
       { role: 'user', content: prompt },
     ]
     await options.recorder?.record({ type: 'message', message: messages.at(-1)!, timestamp: new Date().toISOString() })
+    const emit = options.onEvent ?? (() => undefined)
+    const checkAborted = () => {
+      if (options.signal?.aborted) throw new AgentInterrupted()
+    }
     for (let iteration = 1; iteration <= this.config.maxIterations; iteration += 1) {
-      const response = await this.client.chat({
-        model,
-        messages,
-        tools: this.tools,
-        temperature: this.config.temperature,
-      })
+      checkAborted()
+      emit({ type: 'model_start', iteration })
+      const started = Date.now()
+      let response: ChatResponse
+      try {
+        response = await this.client.chat({
+          model,
+          messages,
+          tools: this.tools,
+          temperature: this.config.temperature,
+          signal: options.signal,
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw new AgentInterrupted()
+        throw error
+      } finally {
+        emit({ type: 'model_end', iteration, durationMs: Date.now() - started })
+      }
       const content = response.content.trim()
       if (options.verbose) process.stderr.write(`[iteration ${iteration}] ${content}\n`)
       const calls = response.toolCalls.length ? response.toolCalls : parseToolCalls(content)
@@ -82,15 +123,25 @@ export class PharoAgentLoop {
         await options.recorder?.record({ type: 'final', content: answer, timestamp: new Date().toISOString() })
         return { answer, messages }
       }
-      messages.push({ role: 'assistant', content })
+      // Narration that came with native tool calls ("Let me look at the tests first").
+      if (response.toolCalls.length && content) emit({ type: 'assistant_text', text: content })
+      messages.push({ role: 'assistant', content: content || JSON.stringify({ tools: calls.map(call => ({ tool: call.name, arguments: call.arguments })) }) })
       await options.recorder?.record({ type: 'message', message: messages.at(-1)!, timestamp: new Date().toISOString() })
       for (const call of calls) {
+        checkAborted()
+        const tool = this.tools.find(candidate => candidate.name === call.name)
+        emit({ type: 'tool_start', call, tool })
         await options.recorder?.record({ type: 'tool_call', call, timestamp: new Date().toISOString() })
+        const toolStarted = Date.now()
         const result = await this.runTool(call, cwd, options)
+        emit({ type: 'tool_end', call, result, durationMs: Date.now() - toolStarted })
         await options.recorder?.record({ type: 'tool_result', call, result, timestamp: new Date().toISOString() })
+        checkAborted()
+        let serialized = JSON.stringify(result, null, 2)
+        if (serialized.length > maxToolResultChars) serialized = `${serialized.slice(0, maxToolResultChars)}\n... (truncated ${serialized.length - maxToolResultChars} characters)`
         messages.push({
           role: 'user',
-          content: `Tool result for ${call.name}:\n${JSON.stringify(result, null, 2)}\nContinue with a tool call JSON object or final answer.`,
+          content: `Tool result for ${call.name}:\n${serialized}\nContinue with a tool call JSON object or final answer.`,
         })
       }
     }
@@ -99,17 +150,20 @@ export class PharoAgentLoop {
 
   private async runTool(call: ToolCall, cwd: string, options: AgentRunOptions): Promise<ToolResult> {
     const tool = this.tools.find(candidate => candidate.name === call.name)
-    if (!tool) return { ok: false, data: { error: `Unknown tool: ${call.name}` } }
+    if (!tool) return { ok: false, data: { error: `Unknown tool: ${call.name}. Available: ${this.tools.map(each => each.name).join(', ')}` } }
     try {
       return await tool.run(call.arguments, {
         config: this.config,
         cwd,
         signal: options.signal ?? new AbortController().signal,
-        approve: (definition, input) => approveTool(this.config, definition, input),
+        approve: (definition, input) => approveTool(this.config, definition, input, { prompt: options.prompt, sessionAllowed: this.sessionAllowed }),
         record: event => options.recorder?.record(event) ?? Promise.resolve(),
+        prompt: options.prompt,
+        onEvent: options.onEvent,
       })
     } catch (error) {
-      return { ok: false, data: { error: (error as Error).message, stack: (error as Error).stack } }
+      if (options.signal?.aborted) throw new AgentInterrupted()
+      return { ok: false, data: { error: (error as Error).message } }
     }
   }
 
@@ -123,11 +177,19 @@ export class PharoAgentLoop {
   private async systemPrompt(cwd: string): Promise<string> {
     const memory = await readMemory(this.config, cwd)
     const toolDescriptions = this.tools.map(tool => `- ${tool.name}: ${tool.description}`).join('\n')
-    return `You are Pharo Agent, a local TypeScript coding agent for Pharo Smalltalk projects.
+    return `You are Pharo Agent, a local coding agent for Pharo Smalltalk projects.
 
-You have a full local coding-agent tool loop: inspect files, edit files, search, run shell commands, manage durable memory, call MCP tools, evaluate Smalltalk, run Pharo scripts, and run SUnit tests.
+You have a full local tool loop: inspect files, edit files, search, run shell commands, manage durable memory, call MCP tools, and work directly inside a Pharo image (evaluate Smalltalk, browse classes and methods, define classes, compile methods, run SUnit tests).
 
-Use tools whenever the answer depends on the live workspace or live Pharo image. Do not invent classes, methods, packages, files, or test results. Prefer small, verifiable steps. When changing files, inspect first, edit precisely, and run the relevant checks.
+Use tools whenever the answer depends on the workspace or the Pharo image. Do not invent classes, methods, packages, files, or test results. Prefer small, verifiable steps. When changing files, inspect first, edit precisely, and run the relevant checks.
+
+# Working in the Pharo image
+- Every pharo_* result has a "backend" field. "live" means the user's running image: changes you make stay there immediately, so be careful. "headless" means a throwaway copy booted for that one call: changes are discarded afterwards, so tell the user if you changed something in headless mode.
+- Explore before changing: pharo_find (classes, implementors, senders, references), pharo_inspect (image, package, or class overview), pharo_source (class definition or method source).
+- Create or change classes with pharo_define_class and methods with pharo_compile. They work on every Pharo version. Do not write class definitions inside pharo_eval: the syntax differs between Pharo versions.
+- pharo_eval compiles the whole snippet first, so it cannot mention a class created in the same snippet. Use Smalltalk at: #ClassName, or make two calls.
+- After changing code, run the relevant tests with pharo_test.
+- Only call pharo_save when the user asks you to save the image.
 
 Tool protocol fallback for GGUF models:
 - Call one or more tools by returning JSON only:

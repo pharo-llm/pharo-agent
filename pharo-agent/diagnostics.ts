@@ -3,6 +3,7 @@ import type { AgentConfig } from './types.ts'
 import { effectiveLlamaServer, effectivePharoVm } from './config.ts'
 import { listGgufFiles } from './hf.ts'
 import { pathExists } from './platform.ts'
+import { liveHealth } from './live.ts'
 
 export type DiagnosticCheck = {
   name: string
@@ -15,12 +16,25 @@ export async function collectDiagnostics(config: AgentConfig, cwd: string, optio
   const checks: DiagnosticCheck[] = []
   checks.push({ name: 'node', ok: nodeSupportsTypeScript(), required: true, detail: process.version })
 
+  // A connected live image is enough on its own; the VM and image file are only
+  // needed for headless runs (or to launch one with `pharo-agent live start`).
+  const live = config.pharoMode === 'headless' ? undefined : await liveHealth(config)
+  const liveOk = Boolean(live?.ok)
+  checks.push({
+    name: 'pharo.live',
+    ok: liveOk,
+    required: config.pharoMode === 'live',
+    detail: liveOk
+      ? `${live!.pharo ?? 'Pharo'} at ${live!.url} (${live!.image ?? ''})`
+      : config.pharoMode === 'headless' ? 'disabled (--pharo-mode headless)' : `${live?.error ?? 'not running'}; run pharo-agent live start or pharo-agent live snippet`,
+  })
   const pharo = await effectivePharoVm(config)
-  checks.push({ name: 'pharo.vm', ok: Boolean(pharo), required: true, detail: pharo ?? 'set PHARO_VM or configure --pharo-vm' })
+  const needHeadless = !liveOk
+  checks.push({ name: 'pharo.vm', ok: Boolean(pharo), required: needHeadless, detail: pharo ?? 'set PHARO_VM or configure --pharo-vm' })
   checks.push({
     name: 'pharo.image',
     ok: Boolean(config.image && await pathExists(path.resolve(cwd, config.image))),
-    required: true,
+    required: needHeadless,
     detail: config.image ?? 'set PHARO_IMAGE or configure --image',
   })
 

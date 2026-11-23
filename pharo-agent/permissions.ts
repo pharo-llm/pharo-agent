@@ -54,18 +54,42 @@ export function isDestructiveShellCommand(command: string): boolean {
   return destructiveShellPatterns.some(pattern => pattern.test(normalized))
 }
 
-export async function approveTool(config: AgentConfig, tool: ToolDefinition, inputJson: JsonObject): Promise<boolean> {
+/** Asks the human a question and resolves with their raw answer. */
+export type Prompter = (question: string) => Promise<string>
+
+export type ApprovalOptions = {
+  /** Reuse the chat's readline instead of opening a second one on stdin. */
+  prompt?: Prompter
+  /** Tools the user allowed for the rest of the session with "a". */
+  sessionAllowed?: Set<string>
+}
+
+export async function approveTool(config: AgentConfig, tool: ToolDefinition, inputJson: JsonObject, options: ApprovalOptions = {}): Promise<boolean> {
   if (tool.readOnly) return true
   if (config.permissionMode === 'dangerous') return true
   if (config.permissionMode === 'read-only') return false
   if (config.permissionMode === 'auto' && !tool.destructive) return true
-  if (!process.stdin.isTTY) return false
-  const rl = readline.createInterface({ input, output })
-  try {
-    const label = tool.destructive ? 'destructive ' : ''
-    const answer = await rl.question(`Allow ${label}${tool.name}? ${JSON.stringify(inputJson).slice(0, 240)} [y/N] `)
-    return answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes'
-  } finally {
-    rl.close()
+  if (!tool.destructive && options.sessionAllowed?.has(tool.name)) return true
+  const label = tool.destructive ? 'destructive ' : ''
+  const question = options.prompt
+    ? `  Allow ${label}${tool.name}? ${tool.destructive ? '[y/N] ' : '[y]es / [N]o / [a]lways this session '}`
+    : `Allow ${label}${tool.name}? ${JSON.stringify(inputJson).slice(0, 240)} [y/N] `
+  let answer: string
+  if (options.prompt) {
+    answer = await options.prompt(question)
+  } else {
+    if (!process.stdin.isTTY) return false
+    const rl = readline.createInterface({ input, output })
+    try {
+      answer = await rl.question(question)
+    } finally {
+      rl.close()
+    }
   }
+  const normalized = answer.trim().toLowerCase()
+  if ((normalized === 'a' || normalized === 'always') && !tool.destructive) {
+    options.sessionAllowed?.add(tool.name)
+    return true
+  }
+  return normalized === 'y' || normalized === 'yes'
 }

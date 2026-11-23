@@ -14,7 +14,8 @@ test('bare pharo-agent opens interactive chat and exits on slash command', () =>
       env: { ...process.env, XDG_STATE_HOME: state },
     })
     assert.equal(result.status, 0, result.stderr)
-    assert.match(result.stdout, /Ask a question/)
+    assert.match(result.stdout, /Pharo Agent v/)
+    assert.match(result.stdout, /\/help/)
   } finally {
     rmSync(state, { recursive: true, force: true })
   }

@@ -9,7 +9,9 @@ It gives developers a single `pharo-agent` CLI with a real local agent loop:
 - file read/write/edit/delete tools;
 - workspace glob and grep tools;
 - shell command execution with read-only detection and permission modes;
-- Pharo image inspection, Smalltalk evaluation, `.st` script execution, and SUnit test runs;
+- live connection to your running Pharo image (no MCP): evaluate, browse, define classes, compile methods, run SUnit, save;
+- headless fallback that boots a throwaway copy of the image for each call;
+- a terminal UI that shows every tool call, the Smalltalk it runs, and its result as it happens;
 - durable project memory;
 - workspace task tracking;
 - session recording/resume;
@@ -68,6 +70,44 @@ Model-driven file tools stay inside the current workspace by default, and the
 web fetch tool blocks localhost/private-network targets unless explicitly
 enabled. See [docs/SECURITY.md](docs/SECURITY.md).
 
+## Talk To Your Running Image (Live Mode)
+
+By default every Pharo call boots a fresh headless copy of the image file and
+throws it away afterwards. Live mode connects the agent to the image you have
+open instead. It shares your state, keeps every change, and answers in
+milliseconds. No MCP is involved: a small HTTP server runs inside the image,
+bound to `127.0.0.1` and protected by a random token.
+
+Connect the image you already have open. Print the one-liner, paste it into a
+Playground, and Do it (Cmd+D):
+
+```sh
+pharo-agent live snippet
+```
+
+Or launch the configured image with the server already loaded:
+
+```sh
+pharo-agent live start            # opens the Pharo window
+pharo-agent live start --headless
+```
+
+Then:
+
+```sh
+pharo-agent live status
+pharo-agent eval "Smalltalk at: #Answer put: 42"
+pharo-agent eval "Answer + 1"     # 43: same image, state is kept
+pharo-agent live save             # save the image to disk
+pharo-agent live stop             # stop the server; the image keeps running
+```
+
+`--pharo-mode` (or `PHARO_AGENT_PHARO_MODE`) chooses where Smalltalk runs:
+`auto` (default) uses the live image when it answers, else a headless copy.
+`live` requires the live image. `headless` never uses it. Every tool result is
+labelled `live` or `headless`, so you always know whether a change was kept.
+See [docs/PHARO.md](docs/PHARO.md).
+
 ## Use Pharo From The Terminal
 
 Evaluate Smalltalk:
@@ -113,17 +153,49 @@ The main product experience is the terminal chat:
 pharo-agent
 ```
 
-Inside the session, users ask normal questions:
+It opens with the Pharo lighthouse, the model, the connected image, and the
+workspace. Then you watch the agent work: every tool call is printed as it
+happens. Pharo calls show the exact Smalltalk being evaluated or compiled,
+shell calls show the command, and file edits show a `-`/`+` diff. Each result
+is shown with where it ran (`live` or `headless`) and how long it took:
 
 ```text
-pharo-agent:1> inspect my image and tell me what tests exist
-pharo-agent:2> run the package tests and summarize the failures
+❯ add an increment method to Counter and test it
+
+● Pharo compile(Counter>>#increment · accessing)
+  │ increment
+  │     count := count + 1
+  ⎿  Compiled Counter>>#increment  live · 12ms
+● Pharo test(CounterTest)
+  ⎿  classes: 1
+     runs: 1
+     passed: 1
+     failures: 0
+     errors: 0  live · 16ms
+● Done: Counter>>#increment is compiled and CounterTest passes.
+  1m43s · 2 tool calls
 ```
+
+You can do anything the agent does yourself, in the same session. The agent
+sees the result in its context:
+
+```text
+❯ > Counter new increment; count          evaluate Smalltalk in the image
+❯ ! git status                            run a shell command
+```
+
+Press **Esc** or **Ctrl+C** to interrupt the agent mid-turn. When a write tool
+needs approval, answer `y`, `n`, or `a` (always allow that tool for this session).
 
 Useful in-session commands:
 
 ```text
 /help
+/live [status|start|snippet|stop]
+/save
+/mode auto|live|headless
+/permissions ask|auto|read-only|dangerous
+/verbose                 full tool output instead of previews
 /status --online
 /model
 /model use qwen-coder-7b
@@ -135,7 +207,7 @@ Useful in-session commands:
 /exit
 ```
 
-One-shot mode is still available:
+One-shot mode is still available. Agent activity goes to stderr, and the answer to stdout:
 
 ```sh
 pharo-agent ask "Inspect this image and run the tests."

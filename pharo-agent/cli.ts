@@ -3,15 +3,19 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import type { AgentConfig, ChatMessage, PermissionMode } from './types.ts'
-import { globalConfigPath, loadConfig, mergeConfig, modelCacheDir, updateConfigFile } from './config.ts'
-import { PharoAgentLoop } from './agent.ts'
-import { evaluateSmalltalk, inspectImage, runPharoScriptFile, runSUnit } from './pharo.ts'
+import { effectivePharoVm, globalConfigPath, loadConfig, mergeConfig, modelCacheDir, pharoModeValue, updateConfigFile } from './config.ts'
+import { AgentInterrupted, PharoAgentLoop } from './agent.ts'
+import { evaluateSmalltalk, inspectImage, runSmalltalkFile, runSUnit } from './pharo.ts'
+import type { PharoEvalResult, PharoRunResult } from './pharo.ts'
+import { liveEndpoint, liveEval, liveHealth, liveInfoFile, liveLoadSnippet, liveSave, liveServerScriptPath, startLiveImage } from './live.ts'
+import { ActivityRenderer, bannerLines, formatDuration, renderMarkdown, style, tildify } from './ui.ts'
+import type { BannerInfo } from './ui.ts'
 import { buildLlamaCommand, startLlamaServer } from './llama.ts'
 import { downloadGguf, downloadGgufSet, formatBytes, HuggingFaceError, listGgufFiles, listOrgModels, resolveGgufShardSet, resolveModelRef, selectGguf } from './hf.ts'
 import { builtInTools } from './tools.ts'
 import { appendMemory, clearMemory, readMemory } from './memory.ts'
 import { listSessions, loadSessionMessages, SessionRecorder } from './sessions.ts'
-import { pathExists, which } from './platform.ts'
+import { pathExists, shellCommand, which } from './platform.ts'
 import { addTask, clearCompletedTasks, readTasks, updateTask } from './task-store.ts'
 import { collectDiagnostics, diagnosticsOk } from './diagnostics.ts'
 import { discoverSetup } from './setup.ts'
@@ -24,6 +28,12 @@ type ChatState = {
   history: ChatMessage[]
   config: AgentConfig
   recorder?: SessionRecorder
+  loop: PharoAgentLoop
+  renderer: ActivityRenderer
+  verbose: boolean
+  rl?: import('node:readline/promises').Interface
+  /** Set while the agent (or a user ! / > command) runs; aborting it interrupts. */
+  turn?: AbortController
 }
 
 const commands: Record<string, CommandFn> = {
@@ -42,6 +52,7 @@ const commands: Record<string, CommandFn> = {
   model: modelCommand,
   memory: memoryCommand,
   sessions: sessionsCommand,
+  live: liveCommand,
   version: versionCommand,
   help: helpCommand,
 }
@@ -87,13 +98,26 @@ async function askCommand(args: string[], global: GlobalOptions): Promise<number
     const prompt = positional.join(' ') || await readStdin()
     if (!prompt.trim()) throw new Error('No prompt provided.')
     const resumeMessages = typeof flags.resume === 'string' ? await loadSessionMessages(flags.resume) : undefined
-    const answer = await new PharoAgentLoop(config).run(prompt, {
-      cwd: global.cwd,
-      verbose: Boolean(flags.verbose),
-      recorder,
-      resumeMessages,
-    })
-    process.stdout.write(`${answer}\n`)
+    const renderer = process.stderr.isTTY && !flags.quiet
+      ? new ActivityRenderer({ verbose: Boolean(flags.verbose), write: text => process.stderr.write(text) })
+      : undefined
+    const controller = new AbortController()
+    const interrupt = () => controller.abort()
+    process.once('SIGINT', interrupt)
+    try {
+      const answer = await new PharoAgentLoop(config).run(prompt, {
+        cwd: global.cwd,
+        recorder,
+        resumeMessages,
+        signal: controller.signal,
+        onEvent: renderer?.handle,
+      })
+      renderer?.stop()
+      process.stdout.write(`${answer}\n`)
+    } finally {
+      renderer?.stop()
+      process.off('SIGINT', interrupt)
+    }
     return 0
   } finally {
     await running?.stop()
@@ -106,54 +130,66 @@ async function chatCommand(args: string[], global: GlobalOptions): Promise<numbe
   let running: Awaited<ReturnType<typeof startLlamaServer>> | undefined
   if (flags['start-server']) running = await startLlamaServer(config, { modelPath: await configuredOrDownloadedModel(config) })
   const recorder = await createOptionalRecorder(positional.join(' ').slice(0, 80) || 'chat')
-  let history: ChatMessage[] = typeof flags.resume === 'string' ? await loadSessionMessages(flags.resume) : []
+  const history: ChatMessage[] = typeof flags.resume === 'string' ? await loadSessionMessages(flags.resume) : []
+  const interactive = Boolean(process.stdin.isTTY)
+  const renderer = new ActivityRenderer({ verbose: Boolean(flags.verbose), write: text => process.stdout.write(text) })
+  const state: ChatState = { history, config, recorder, loop: new PharoAgentLoop(config), renderer, verbose: Boolean(flags.verbose) }
   try {
-    printChatWelcome(config, global.cwd, recorder?.id)
-    const loop = new PharoAgentLoop(config)
-    const state: ChatState = { history, config, recorder }
-    const firstPrompt = positional.join(' ')
-    if (firstPrompt) {
-      await runChatTurn(loop, firstPrompt, state, global, Boolean(flags.verbose))
-      history = state.history
-    }
-    if (!process.stdin.isTTY) {
-      const piped = await readStdin()
-      for (const raw of piped.split(/\r?\n/)) {
+    await printChatWelcome(config, global.cwd)
+    if (!interactive) {
+      const lines = [positional.join(' '), ...(await readStdin()).split(/\r?\n/)]
+      for (const raw of lines) {
         const prompt = raw.trim()
         if (!prompt || prompt === '/paste') continue
-        if (await handleChatSlash(prompt, global, state)) {
-          history = state.history
-          continue
-        }
-        await runChatTurn(loop, prompt, state, global, Boolean(flags.verbose))
-        history = state.history
+        await handleChatInput(prompt, state, global)
       }
       return 0
     }
     const readline = await import('node:readline/promises')
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    try {
-      while (true) {
-        let prompt: string
-        try {
-          prompt = (await rl.question(chatPrompt(history))).trim()
-        } catch {
-          return 0
-        }
-        if (!prompt) continue
-        if (prompt === '/paste') prompt = await readMultilinePrompt(rl)
-        if (!prompt) continue
-        if (await handleChatSlash(prompt, global, state)) {
-          history = state.history
-          continue
-        }
-        await runChatTurn(loop, prompt, state, global, Boolean(flags.verbose))
-        history = state.history
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, historySize: 200 })
+    state.rl = rl
+    let lastSigint = 0
+    rl.on('SIGINT', () => {
+      if (state.turn) {
+        state.turn.abort()
+        return
       }
-    } finally {
-      rl.close()
+      if (rl.line) {
+        // Clear the current input, like a shell.
+        rl.write(null, { ctrl: true, name: 'u' })
+        return
+      }
+      if (Date.now() - lastSigint < 2_000) {
+        rl.close()
+        return
+      }
+      lastSigint = Date.now()
+      process.stdout.write(`\n${style.dim('(press Ctrl+C again to exit, or type /exit)')}\n${chatPrompt()}`)
+    })
+    process.stdin.on('keypress', (_text, key: { name?: string } | undefined) => {
+      if (key?.name === 'escape' && state.turn) state.turn.abort()
+    })
+    let closed = false
+    rl.once('close', () => {
+      closed = true
+    })
+    if (positional.length) await handleChatInput(positional.join(' '), state, global)
+    while (!closed) {
+      let prompt: string
+      try {
+        prompt = (await rl.question(chatPrompt())).trim()
+      } catch {
+        break
+      }
+      if (!prompt) continue
+      if (prompt === '/paste') prompt = await readMultilinePrompt(rl)
+      if (!prompt) continue
+      await handleChatInput(prompt, state, global)
     }
+    process.stdout.write('\n')
+    return 0
   } finally {
+    state.rl?.close()
     await running?.stop()
   }
 }
@@ -248,36 +284,105 @@ async function statusCommand(args: string[], global: GlobalOptions): Promise<num
 
 async function evalCommand(args: string[], global: GlobalOptions): Promise<number> {
   const { flags, positional } = parseFlags(args)
-  const result = await evaluateSmalltalk(await runtimeConfig(global, flags), positional.join(' '), { cwd: global.cwd })
-  printRunResult(result, Boolean(flags.json))
-  return result.exitCode
+  const code = positional.join(' ') || await readStdin()
+  if (!code.trim()) throw new Error('Usage: pharo-agent eval "Smalltalk code"')
+  return printEvalResult(await evaluateSmalltalk(await runtimeConfig(global, flags), code, { cwd: global.cwd, ui: Boolean(flags.ui) }), Boolean(flags.json))
 }
 
 async function inspectCommand(args: string[], global: GlobalOptions): Promise<number> {
   const { flags, positional } = parseFlags(args)
-  const result = await inspectImage(await runtimeConfig(global, flags), positional[0], { cwd: global.cwd })
-  printRunResult(result, Boolean(flags.json))
-  return result.exitCode
+  return printEvalResult(await inspectImage(await runtimeConfig(global, flags), positional[0], { cwd: global.cwd, pattern: stringFlag(flags.pattern) }), Boolean(flags.json))
 }
 
 async function stCommand(args: string[], global: GlobalOptions): Promise<number> {
   const { flags, positional } = parseFlags(args)
   const script = positional[0]
   if (!script) throw new Error('Usage: pharo-agent st <script.st>')
-  const result = await runPharoScriptFile(await runtimeConfig(global, flags), script, { cwd: global.cwd })
-  printRunResult(result, Boolean(flags.json))
-  return result.exitCode
+  return printEvalResult(await runSmalltalkFile(await runtimeConfig(global, flags), script, { cwd: global.cwd }), Boolean(flags.json))
 }
 
 async function testCommand(args: string[], global: GlobalOptions): Promise<number> {
   const { flags } = parseFlags(args)
-  const result = await runSUnit(await runtimeConfig(global, flags), {
+  return printEvalResult(await runSUnit(await runtimeConfig(global, flags), {
     package: stringFlag(flags.package),
     className: stringFlag(flags.class ?? flags.className),
     selector: stringFlag(flags.selector),
-  }, { cwd: global.cwd })
-  printRunResult(result, Boolean(flags.json))
-  return result.exitCode
+  }, { cwd: global.cwd }), Boolean(flags.json))
+}
+
+async function liveCommand(args: string[], global: GlobalOptions, sessionConfig?: AgentConfig): Promise<number> {
+  const sub = args.shift() ?? 'status'
+  const { flags } = parseFlags(args)
+  const config = sessionConfig ?? await runtimeConfig(global, flags)
+  if (sub === 'status') {
+    const health = await liveHealth(config)
+    if (health?.ok) {
+      process.stdout.write(`${style.green('● live')} ${health.pharo ?? 'Pharo'} at ${health.url}\n  image: ${health.image ?? '?'}\n  requests served: ${health.requests ?? 0}\n  mode: ${config.pharoMode}\n`)
+      return 0
+    }
+    process.stdout.write(`${style.yellow('○ no live image')}${health ? ` (${health.url}: ${health.error ?? 'not answering'})` : ''}\n`)
+    process.stdout.write(`  mode: ${config.pharoMode}${config.pharoMode === 'auto' ? ' (falls back to a headless copy of the image)' : ''}\n\n`)
+    process.stdout.write(`Connect your open image: paste this into a Playground and Do it (Cmd+D):\n\n  ${style.cyan(liveLoadSnippet())}\n\n`)
+    process.stdout.write(`Or launch the configured image with the server: ${style.cyan('pharo-agent live start')}\n`)
+    return 1
+  }
+  if (sub === 'snippet') {
+    process.stdout.write(`${liveLoadSnippet()}\n`)
+    if (!flags.quiet) process.stderr.write(style.dim(`\nPaste it into a Playground of your open image and Do it (Cmd+D).\nThe server listens on 127.0.0.1:${config.livePort} and writes its token to ${tildify(liveInfoFile(config))}.\nServer source: ${liveServerScriptPath()}\n`))
+    return 0
+  }
+  if (sub === 'start') {
+    const existing = await liveHealth(config)
+    if (existing?.ok) {
+      process.stdout.write(`A live image is already running at ${existing.url} (${existing.image ?? existing.pharo ?? ''}).\n`)
+      return 0
+    }
+    process.stdout.write(`Starting ${config.image ?? 'the configured image'} with the live server...\n`)
+    const started = await startLiveImage(config, {
+      headless: Boolean(flags.headless),
+      port: flags.port ? Number(flags.port) : undefined,
+      cwd: global.cwd,
+    })
+    process.stdout.write(`${style.green('● live')} ${started.health.pharo ?? 'Pharo'} at ${started.url} (pid ${started.pid ?? '?'})\n  log: ${started.logPath}\n`)
+    return 0
+  }
+  if (sub === 'stop' || sub === 'save') {
+    const endpoint = await liveEndpoint(config)
+    const health = await liveHealth(config)
+    if (!endpoint || !health?.ok) {
+      process.stdout.write('No live image is running.\n')
+      return 1
+    }
+    if (sub === 'save') {
+      const saved = await liveSave(endpoint)
+      process.stdout.write(saved.ok ? `Saving ${saved.image ?? 'the image'}.\n` : `Save failed: ${saved.error}\n`)
+      return saved.ok ? 0 : 1
+    }
+    await liveEval(endpoint, `[ ((Smalltalk at: #PharoAgentLive) at: #stop) value ] forkAt: Processor userBackgroundPriority. 'stopping'`, { timeoutMs: 5_000 })
+    process.stdout.write('Live server stopped. The image keeps running.\n')
+    return 0
+  }
+  throw new Error('Usage: pharo-agent live <status|start [--headless] [--port N]|snippet|stop|save>')
+}
+
+function printEvalResult(result: PharoEvalResult | PharoRunResult, json: boolean): number {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+    return result.ok ? 0 : 1
+  }
+  if (!('backend' in result)) {
+    if (result.stdout) process.stdout.write(result.stdout)
+    if (result.stderr) process.stderr.write(result.stderr)
+    return result.exitCode
+  }
+  if (result.output && !result.ok) process.stderr.write(`${result.output}\n`)
+  if (result.result !== undefined) process.stdout.write(`${result.result}\n`)
+  if (!result.ok && result.error) {
+    process.stderr.write(`${result.error}\n`)
+    for (const line of result.stack?.slice(0, 8) ?? []) process.stderr.write(`  ${line}\n`)
+  }
+  for (const warning of result.warnings ?? []) process.stderr.write(`warning: ${warning}\n`)
+  return result.ok ? 0 : 1
 }
 
 async function toolsCommand(args: string[], global: GlobalOptions): Promise<number> {
@@ -539,7 +644,9 @@ Usage:
   pharo-agent status [--online]
   pharo-agent configure [--pharo-vm PATH] [--image IMAGE] [--model PATH_OR_REF]
   pharo-agent doctor [--online]
+  pharo-agent live [status|start|snippet|stop|save]
   pharo-agent eval "Smalltalk code"
+  pharo-agent inspect [ClassOrPackage] [--pattern text]
   pharo-agent st script.st
   pharo-agent test [--package Pkg] [--class TestClass] [--selector testName]
   pharo-agent model [list|files|download|use|serve|publish|current]
@@ -553,6 +660,9 @@ Global options:
 
 Permission modes:
   --permission-mode ask|auto|read-only|dangerous
+
+Pharo modes (where Smalltalk runs):
+  --pharo-mode auto|live|headless   auto = live image when connected, else headless copy
 
 Safety flags:
   --allow-outside-workspace true|false
@@ -585,6 +695,10 @@ function configUpdatesFromFlags(flags: Record<string, unknown>): Partial<AgentCo
   if (flags.temperature) updates.temperature = Number(flags.temperature)
   if (flags['llama-port']) updates.llamaPort = Number(flags['llama-port'])
   if (flags['permission-mode']) updates.permissionMode = String(flags['permission-mode']) as PermissionMode
+  if (flags['pharo-mode']) updates.pharoMode = pharoModeValue(String(flags['pharo-mode']))
+  if (flags['live-port']) updates.livePort = Number(flags['live-port'])
+  assignFlag(updates, flags, 'live-url', 'liveUrl')
+  assignFlag(updates, flags, 'live-token', 'liveToken')
   if (flags.headless !== undefined) updates.headless = String(flags.headless) !== 'false'
   if (flags['allow-outside-workspace'] !== undefined) updates.allowOutsideWorkspace = boolFlag(flags['allow-outside-workspace'])
   if (flags['allow-private-network'] !== undefined) updates.allowPrivateNetwork = boolFlag(flags['allow-private-network'])
@@ -627,14 +741,6 @@ function parseFlags(args: string[]): { flags: Record<string, unknown>; positiona
   return { flags, positional }
 }
 
-function printRunResult(result: { stdout: string; stderr: string; exitCode: number; command: string[] }, json: boolean): void {
-  if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
-  else {
-    if (result.stdout) process.stdout.write(result.stdout)
-    if (result.stderr) process.stderr.write(result.stderr)
-  }
-}
-
 function stringFlag(value: unknown): string | undefined {
   return typeof value === 'string' && value ? value : undefined
 }
@@ -653,28 +759,111 @@ async function readStdin(): Promise<string> {
   return text
 }
 
-async function runChatTurn(loop: PharoAgentLoop, prompt: string, state: ChatState, global: GlobalOptions, verbose: boolean): Promise<void> {
-  process.stdout.write(color('thinking...\n', '2'))
+/** One line of chat input: slash command, `!` shell, `>` Smalltalk, or a prompt for the agent. */
+async function handleChatInput(input: string, state: ChatState, global: GlobalOptions): Promise<void> {
+  if (input.startsWith('!')) return userShell(input.slice(1).trim(), state, global)
+  if (input.startsWith('>')) return userSmalltalk(input.slice(1).trim(), state, global)
+  if (await handleChatSlash(input, global, state)) return
+  await runChatTurn(input, state, global)
+}
+
+async function runChatTurn(prompt: string, state: ChatState, global: GlobalOptions): Promise<void> {
+  const controller = new AbortController()
+  state.turn = controller
+  const started = Date.now()
+  state.renderer.toolCalls = 0
+  process.stdout.write('\n')
   try {
-    const result = await loop.runTurn(prompt, {
+    const result = await state.loop.runTurn(prompt, {
       cwd: global.cwd,
       recorder: state.recorder,
       resumeMessages: trimChatHistory(state.history),
-      verbose,
+      signal: controller.signal,
+      onEvent: state.renderer.handle,
+      prompt: state.rl ? question => state.rl!.question(question, { signal: controller.signal }) : undefined,
     })
+    state.renderer.stop()
     state.history = trimChatHistory(result.messages)
-    process.stdout.write(`\n${result.answer}\n\n`)
+    process.stdout.write(`${style.bold('●')} ${renderMarkdown(result.answer)}\n`)
+    process.stdout.write(style.dim(`  ${formatDuration(Date.now() - started)} · ${state.renderer.toolCalls} tool call${state.renderer.toolCalls === 1 ? '' : 's'}\n\n`))
   } catch (error) {
-    process.stdout.write(`\n${color('error:', '31')} ${(error as Error).message}\n`)
-    process.stdout.write('Run /status for setup checks, /model current for model config, or /help for chat commands.\n\n')
+    state.renderer.stop()
+    if (controller.signal.aborted || error instanceof AgentInterrupted) {
+      process.stdout.write(`  ${style.gray('⎿')}  ${style.yellow('Interrupted.')} ${style.dim('What should the agent do instead?')}\n\n`)
+    } else {
+      process.stdout.write(`\n${style.red('error:')} ${(error as Error).message}\n`)
+      process.stdout.write(style.dim('Run /status for setup checks, /model current for model config, or /help for chat commands.\n\n'))
+    }
+  } finally {
+    state.turn = undefined
   }
+}
+
+/** `!cmd`: the user runs a shell command; output is shown live and added to the agent's context. */
+async function userShell(command: string, state: ChatState, global: GlobalOptions): Promise<void> {
+  if (!command) {
+    process.stdout.write(style.dim('Usage: !<shell command>\n'))
+    return
+  }
+  const controller = new AbortController()
+  state.turn = controller
+  let output = ''
+  const code = await new Promise<number>(resolve => {
+    const [bin, ...rest] = shellCommand(command)
+    const child = spawn(bin!, rest, { cwd: global.cwd, stdio: ['ignore', 'pipe', 'pipe'], signal: controller.signal })
+    const forward = (chunk: Buffer) => {
+      const text = chunk.toString('utf8')
+      output += text
+      process.stdout.write(text)
+    }
+    child.stdout.on('data', forward)
+    child.stderr.on('data', forward)
+    child.on('error', error => {
+      if (!controller.signal.aborted) process.stdout.write(`${style.red(error.message)}\n`)
+      resolve(127)
+    })
+    child.on('close', exitCode => resolve(exitCode ?? 130))
+  })
+  state.turn = undefined
+  if (output && !output.endsWith('\n')) process.stdout.write('\n')
+  if (code !== 0) process.stdout.write(style.dim(`exit ${code}\n`))
+  addUserContext(state, `[I ran a shell command myself]\n$ ${command}\n${truncate(output, 6_000)}${code !== 0 ? `\n(exit ${code})` : ''}`)
+}
+
+/** `>code`: the user evaluates Smalltalk in the image directly, like a Playground print-it. */
+async function userSmalltalk(code: string, state: ChatState, global: GlobalOptions): Promise<void> {
+  if (!code) {
+    process.stdout.write(style.dim('Usage: > <Smalltalk code>   e.g.  > 3 factorial\n'))
+    return
+  }
+  const controller = new AbortController()
+  state.turn = controller
+  try {
+    const result = await evaluateSmalltalk(state.config, code, { cwd: global.cwd, signal: controller.signal })
+    const text = result.ok ? (result.result ?? '') : `${result.error ?? 'failed'}${result.stack?.length ? `\n  ${result.stack.slice(0, 4).join('\n  ')}` : ''}`
+    const backend = result.backend === 'live' ? style.green('live') : style.yellow('headless')
+    process.stdout.write(`${style.gray('⎿')}  ${result.ok ? text : style.red(text)}  ${style.dim(`${backend} · ${formatDuration(result.durationMs)}`)}\n`)
+    addUserContext(state, `[I evaluated Smalltalk in the ${result.backend} image myself]\n${code}\n=> ${truncate(text, 4_000)}`)
+  } catch (error) {
+    process.stdout.write(`${style.red('error:')} ${(error as Error).message}\n`)
+  } finally {
+    state.turn = undefined
+  }
+}
+
+function addUserContext(state: ChatState, content: string): void {
+  state.history = trimChatHistory([...state.history, { role: 'user', content }])
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}\n... (${text.length - max} more characters)` : text
 }
 
 async function handleChatSlash(prompt: string, global: GlobalOptions, state: ChatState): Promise<boolean> {
   if (!prompt.startsWith('/')) return false
   const [command, ...rest] = prompt.slice(1).split(/\s+/)
   if (command === 'exit' || command === 'quit') throw new ChatExit()
-  if (command === 'help') {
+  if (command === 'help' || command === '?') {
     printChatHelp()
     return true
   }
@@ -703,6 +892,37 @@ async function handleChatSlash(prompt: string, global: GlobalOptions, state: Cha
     process.stdout.write(`Resumed ${id}; ${state.history.length} messages loaded into context.\n`)
     return true
   }
+  if (command === 'verbose') {
+    state.verbose = rest[0] ? boolFlag(rest[0]) : !state.verbose
+    state.renderer.setVerbose(state.verbose)
+    process.stdout.write(`Full tool output ${state.verbose ? 'on' : 'off'}.\n`)
+    return true
+  }
+  if (command === 'eval') {
+    await userSmalltalk(rest.join(' '), state, global)
+    return true
+  }
+  if (command === 'mode') {
+    if (!rest[0]) {
+      process.stdout.write(`Pharo mode: ${state.config.pharoMode} (auto | live | headless)\n`)
+      return true
+    }
+    state.config.pharoMode = pharoModeValue(rest[0])
+    process.stdout.write(`Pharo mode set to ${state.config.pharoMode} for this session.\n`)
+    return true
+  }
+  if (command === 'permissions') {
+    if (!rest[0]) {
+      const allowed = [...state.loop.sessionAllowed]
+      process.stdout.write(`Permission mode: ${state.config.permissionMode}${allowed.length ? `; always allowed this session: ${allowed.join(', ')}` : ''}\n`)
+      return true
+    }
+    state.config.permissionMode = permissionModeValue(rest[0], state.config.permissionMode)
+    process.stdout.write(`Permission mode set to ${state.config.permissionMode} for this session.\n`)
+    return true
+  }
+  if (command === 'live') return await liveCommand(rest.length ? rest : ['status'], global, state.config).then(() => true)
+  if (command === 'save') return await liveCommand(['save'], global, state.config).then(() => true)
   if (command === 'sessions') return await sessionsCommand(rest.length ? rest : ['list']).then(() => true)
   if (command === 'setup') return await setupCommand(rest, global).then(() => true)
   if (command === 'status') return await statusCommand(rest, global).then(() => true)
@@ -736,37 +956,61 @@ async function createOptionalRecorder(title: string): Promise<SessionRecorder | 
   }
 }
 
-function printChatWelcome(config: AgentConfig, cwd: string, sessionId?: string): void {
-  process.stdout.write(`${bold('Pharo Agent')} ${color(`v${VERSION}`, '2')}\n`)
-  process.stdout.write(`Workspace: ${cwd}\n`)
-  process.stdout.write(`Model: ${config.model ?? config.modelFile ?? config.modelPath ?? config.baseUrl}\n`)
-  process.stdout.write(`Session: ${sessionId ?? '(not recorded)'}\n`)
-  process.stdout.write('Ask a question, or type /help for commands. Type /exit to quit.\n\n')
+async function printChatWelcome(config: AgentConfig, cwd: string): Promise<void> {
+  const [modelReady, health] = await Promise.all([
+    fetch(`${config.baseUrl.replace(/\/$/, '')}/models`, { signal: AbortSignal.timeout(1_500) }).then(response => response.ok).catch(() => false),
+    config.pharoMode === 'headless' ? Promise.resolve(undefined) : liveHealth(config),
+  ])
+  const vm = await effectivePharoVm(config)
+  const pharo: BannerInfo['pharo'] = health?.ok
+    ? { kind: 'live', version: health.pharo, image: health.image, url: health.url }
+    : vm && config.image
+      ? { kind: 'headless', image: config.image }
+      : { kind: 'none' }
+  const lines = bannerLines({
+    version: VERSION,
+    model: config.model ?? config.modelFile ?? (config.modelPath ? path.basename(config.modelPath) : 'default model'),
+    modelStatus: modelReady ? 'ready' : 'offline',
+    modelUrl: config.baseUrl,
+    pharo,
+    cwd,
+    permissionMode: config.permissionMode,
+  })
+  process.stdout.write(`\n${lines.join('\n')}\n\n`)
 }
 
 function printChatHelp(): void {
-  process.stdout.write(`Chat commands:
-/help                 Show this help
-/status [--online]    Show setup and model status
-/setup [--local]      Run first-time setup
-/doctor [--online]    Run diagnostics
-/tools                List model tools
-/model [subcommand]   Manage GGUF models
-/tasks [subcommand]   Manage workspace tasks
-/memory [subcommand]  Read/write project memory
-/sessions             List saved sessions
-/resume <id>          Load a previous session into context
-/context              Show active context size
-/clear                Clear active context
-/new                  Start a fresh transcript
-/paste                Enter a multi-line prompt ending with /end
-/exit                 Quit
+  const row = (left: string, right: string) => `  ${style.cyan(left.padEnd(22))} ${right}`
+  process.stdout.write(`${style.bold('Chat commands:')}
+${row('<question>', 'Ask the agent; every tool call and result is shown as it runs')}
+${row('! <command>', 'Run a shell command yourself (the agent sees the output)')}
+${row('> <smalltalk>', 'Evaluate Smalltalk in the image yourself (also /eval)')}
+${row('esc / Ctrl+C', 'Interrupt the agent mid-turn')}
+${row('/live [status|start|snippet|stop]', '')}
+${row('', 'Connect to a running Pharo image')}
+${row('/save', 'Save the live image')}
+${row('/mode [auto|live|headless]', 'Where Pharo code runs')}
+${row('/permissions [mode]', 'ask | auto | read-only | dangerous')}
+${row('/verbose [on|off]', 'Show complete tool output')}
+${row('/status [--online]', 'Show setup and model status')}
+${row('/setup [--local]', 'Run first-time setup')}
+${row('/doctor [--online]', 'Run diagnostics')}
+${row('/tools', 'List model tools')}
+${row('/model [subcommand]', 'Manage GGUF models')}
+${row('/tasks [subcommand]', 'Manage workspace tasks')}
+${row('/memory [subcommand]', 'Read/write project memory')}
+${row('/sessions', 'List saved sessions')}
+${row('/resume <id>', 'Load a previous session into context')}
+${row('/context', 'Show active context size')}
+${row('/clear', 'Clear active context')}
+${row('/new', 'Start a fresh transcript')}
+${row('/paste', 'Enter a multi-line prompt ending with /end')}
+${row('/exit', 'Quit')}
 `)
 }
 
-function chatPrompt(history: ChatMessage[]): string {
-  const turns = history.filter(message => message.role === 'user').length
-  return color(`pharo-agent:${turns + 1}> `, '36')
+function chatPrompt(): string {
+  return `${style.blue('❯')} `
 }
 
 function trimChatHistory(messages: ChatMessage[], maxMessages = 40): ChatMessage[] {
@@ -801,6 +1045,7 @@ async function printStatus(config: AgentConfig, cwd: string, options: { online?:
 function nextSteps(checks: { name: string; ok: boolean }[]): string[] {
   const missing = new Set(checks.filter(check => !check.ok).map(check => check.name))
   const steps: string[] = []
+  if (missing.has('pharo.live')) steps.push('Connect your open image: pharo-agent live snippet (paste it in a Playground), or pharo-agent live start')
   if (missing.has('pharo.vm')) steps.push('Run pharo-agent setup or pharo-agent configure --pharo-vm /path/to/pharo')
   if (missing.has('pharo.image')) steps.push('Run pharo-agent setup or pharo-agent configure --image /path/to/Pharo.image')
   if (missing.has('model.path') && missing.has('llm.api')) steps.push('Upload/download a GGUF, then run pharo-agent model download --use or pharo-agent model serve --hf <repo:file>')

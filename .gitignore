@@ -21,3 +21,4 @@ venv/
 *.gguf
 *.gguf.part
 .pharo-agent.json
+PharoDebug.log

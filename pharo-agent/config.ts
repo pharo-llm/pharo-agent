@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { existsSync } from 'node:fs'
-import type { AgentConfig, PermissionMode } from './types.ts'
+import type { AgentConfig, PermissionMode, PharoMode } from './types.ts'
 import { readJsonFile, which, writeJsonFile, xdgCacheDir, xdgConfigDir } from './platform.ts'
 import { defaultModelPreset, defaultPublishRepo } from './models.ts'
 
@@ -11,6 +11,8 @@ export const defaultBaseUrl = 'http://127.0.0.1:8080/v1'
 export function defaultConfig(): AgentConfig {
   return {
     headless: true,
+    pharoMode: 'auto',
+    livePort: 4044,
     timeoutSeconds: 120,
     modelRepo: defaultModelRepo,
     publishRepo: defaultPublishRepo,
@@ -99,6 +101,11 @@ function envConfig(): Partial<AgentConfig> {
   mapEnv(env, 'PHARO_AGENT_MODEL_CACHE', 'modelCacheDir')
   mapEnv(env, 'PHARO_AGENT_MCP_CONFIG', 'mcpConfig')
   mapEnv(env, 'PHARO_AGENT_MEMORY', 'memoryFile')
+  mapEnv(env, 'PHARO_AGENT_LIVE_URL', 'liveUrl')
+  mapEnv(env, 'PHARO_AGENT_LIVE_TOKEN', 'liveToken')
+  mapEnv(env, 'PHARO_AGENT_LIVE_FILE', 'liveFile')
+  if (process.env.PHARO_AGENT_PHARO_MODE) env.pharoMode = pharoModeValue(process.env.PHARO_AGENT_PHARO_MODE)
+  if (process.env.PHARO_AGENT_LIVE_PORT) env.livePort = Number(process.env.PHARO_AGENT_LIVE_PORT)
   if (process.env.PHARO_AGENT_TIMEOUT) env.timeoutSeconds = Number(process.env.PHARO_AGENT_TIMEOUT)
   if (process.env.PHARO_AGENT_MAX_ITERATIONS) env.maxIterations = Number(process.env.PHARO_AGENT_MAX_ITERATIONS)
   if (process.env.PHARO_AGENT_LLAMA_PORT) env.llamaPort = Number(process.env.PHARO_AGENT_LLAMA_PORT)
@@ -131,6 +138,11 @@ export async function effectivePharoVm(config: AgentConfig): Promise<string | un
 
 export async function effectiveLlamaServer(config: AgentConfig): Promise<string | undefined> {
   return config.llamaServer ?? (await which('llama-server')) ?? (await which('llama'))
+}
+
+export function pharoModeValue(value: string): PharoMode {
+  if (value === 'auto' || value === 'live' || value === 'headless') return value
+  throw new Error(`Invalid Pharo mode: ${value}. Use auto, live, or headless.`)
 }
 
 function envBool(value: string): boolean {

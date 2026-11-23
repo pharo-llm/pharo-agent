@@ -28,3 +28,19 @@ test('auto mode does not approve destructive tools without a tty prompt', async 
     inputSchema: { type: 'object', properties: {} },
   }, {}), true)
 })
+
+test('answering "a" allows a tool for the rest of the session, but never a destructive one', async () => {
+  const config = defaultConfig()
+  const write = { name: 'pharo_compile', description: 'compile', readOnly: false, inputSchema: { type: 'object' as const, properties: {} } }
+  const destructive = { ...write, name: 'file_delete', destructive: true }
+  const sessionAllowed = new Set<string>()
+  const questions: string[] = []
+  const prompt = async (question: string) => {
+    questions.push(question)
+    return 'a'
+  }
+  assert.equal(await approveTool(config, write, {}, { prompt, sessionAllowed }), true)
+  assert.equal(await approveTool(config, write, {}, { prompt, sessionAllowed }), true)
+  assert.equal(questions.length, 1)
+  assert.equal(await approveTool(config, destructive, {}, { prompt, sessionAllowed }), false)
+})

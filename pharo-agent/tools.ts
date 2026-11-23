@@ -1,7 +1,9 @@
 import path from 'node:path'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import type { AgentTool, JsonObject, ToolContext, ToolResult } from './types.ts'
-import { evaluateSmalltalk, inspectImage, runPharoScriptFile, runSUnit } from './pharo.ts'
+import { compileMethod, defineClass, evaluateSmalltalk, findInImage, inspectImage, methodSource, resolveBackend, runSmalltalkFile, runSUnit } from './pharo.ts'
+import type { FindKind, PharoEvalResult } from './pharo.ts'
+import { liveSave } from './live.ts'
 import { collectFiles, isTextFile, readTextSlice } from './workspace.ts'
 import { appendMemory, readMemory } from './memory.ts'
 import { callMcpTool, listMcpTools } from './mcp.ts'
@@ -22,9 +24,14 @@ export function builtInTools(): AgentTool[] {
     grepTool,
     shellTool,
     pharoInspectTool,
+    pharoFindTool,
+    pharoSourceTool,
     pharoEvalTool,
-    pharoScriptTool,
+    pharoDefineClassTool,
+    pharoCompileTool,
     pharoTestTool,
+    pharoScriptTool,
+    pharoSaveTool,
     memoryReadTool,
     memoryWriteTool,
     taskListTool,
@@ -205,40 +212,129 @@ const shellTool: AgentTool = {
 
 const pharoInspectTool: AgentTool = {
   name: 'pharo_inspect',
-  description: 'Inspect the configured Pharo image or a class name.',
+  description: 'Overview of the Pharo image (version, package/class counts), of a package (its classes), or of a class (superclass, package, comment, variables, selectors, definition). Use pattern without target to list package names.',
   readOnly: true,
-  inputSchema: schema({ target: stringProp('Class name to inspect. Omit for image overview.', false) }),
+  inputSchema: schema({
+    target: stringProp('Class or package name. Omit for an image overview.', false),
+    pattern: stringProp('Substring filter for package names in the image overview.', false),
+  }),
   async run(input, context) {
-    return pharoResult(await inspectImage(context.config, optionalString(input.target), { signal: context.signal, cwd: context.cwd }))
+    return evalToolResult(await inspectImage(context.config, optionalString(input.target), { pattern: optionalString(input.pattern), signal: context.signal, cwd: context.cwd }))
   },
 }
 
 const pharoEvalTool: AgentTool = {
   name: 'pharo_eval',
-  description: 'Evaluate Smalltalk code in the configured Pharo image.',
+  description: 'Evaluate Smalltalk in the Pharo image (the user\'s running image when live) and answer the printString of the last statement. Statements are separated by periods; declare temporaries with | a b |. Errors come back with the class, message, and stack.',
   readOnly: false,
-  inputSchema: schema({ code: stringProp('Smalltalk code to evaluate.', true) }, ['code']),
+  inputSchema: schema({
+    code: stringProp('Smalltalk statements to evaluate, like a Playground "Print it".', true),
+    ui: boolProp('Run in the UI process (needed to open windows or touch Morphic). Live only.', false),
+  }, ['code']),
   async run(input, context) {
     if (!await context.approve(pharoEvalTool, input)) return denied()
-    return pharoResult(await evaluateSmalltalk(context.config, String(input.code ?? ''), { signal: context.signal, cwd: context.cwd }))
+    return evalToolResult(await evaluateSmalltalk(context.config, String(input.code ?? ''), { ui: input.ui === true, signal: context.signal, cwd: context.cwd }))
+  },
+}
+
+const pharoSourceTool: AgentTool = {
+  name: 'pharo_source',
+  description: 'Read source from the image: a method (className + selector) or, without selector, the class definition and comment.',
+  readOnly: true,
+  inputSchema: schema({
+    className: stringProp('Class name, e.g. OrderedCollection.', true),
+    selector: stringProp('Method selector, e.g. add: or printOn:. Omit for the class definition.', false),
+    classSide: boolProp('Look on the class side (class methods).', false),
+  }, ['className']),
+  async run(input, context) {
+    return evalToolResult(await methodSource(context.config, {
+      className: String(input.className ?? ''),
+      selector: optionalString(input.selector),
+      classSide: input.classSide === true,
+    }, { signal: context.signal, cwd: context.cwd }))
+  },
+}
+
+const pharoFindTool: AgentTool = {
+  name: 'pharo_find',
+  description: 'Search the image: classes whose name contains query, implementors of a selector, senders of a selector, or references to a class/global.',
+  readOnly: true,
+  inputSchema: schema({
+    kind: { type: 'string', enum: ['classes', 'implementors', 'senders', 'references'], description: 'What to search for.' },
+    query: stringProp('Class name fragment, selector (e.g. at:put:), or global name.', true),
+    limit: numberProp('Maximum results (default 100).', false),
+  }, ['kind', 'query']),
+  async run(input, context) {
+    const kind = String(input.kind ?? 'classes') as FindKind
+    if (!['classes', 'implementors', 'senders', 'references'].includes(kind)) return fail(`Invalid kind: ${kind}. Use classes, implementors, senders, or references.`)
+    return evalToolResult(await findInImage(context.config, { kind, query: String(input.query ?? ''), limit: numberValue(input.limit, 100) }, { signal: context.signal, cwd: context.cwd }))
+  },
+}
+
+const pharoDefineClassTool: AgentTool = {
+  name: 'pharo_define_class',
+  description: 'Create a class, or redefine an existing one (existing methods are kept). Works on every Pharo version.',
+  readOnly: false,
+  inputSchema: schema({
+    name: stringProp('Class name.', true),
+    superclass: stringProp('Superclass name. Defaults to Object.', false),
+    slots: { type: 'array', items: { type: 'string' }, description: 'Instance variable names.' },
+    classVariables: { type: 'array', items: { type: 'string' }, description: 'Class (shared) variable names.' },
+    package: stringProp('Package name, e.g. MyProject-Core.', true),
+    tag: stringProp('Optional package tag.', false),
+    comment: stringProp('Optional class comment.', false),
+  }, ['name', 'package']),
+  async run(input, context) {
+    if (!await context.approve(pharoDefineClassTool, input)) return denied()
+    return evalToolResult(await defineClass(context.config, {
+      name: String(input.name ?? ''),
+      superclass: optionalString(input.superclass),
+      slots: stringArray(input.slots),
+      classVariables: stringArray(input.classVariables),
+      package: String(input.package ?? ''),
+      tag: optionalString(input.tag),
+      comment: optionalString(input.comment),
+    }, { signal: context.signal, cwd: context.cwd }), { changesImage: true })
+  },
+}
+
+const pharoCompileTool: AgentTool = {
+  name: 'pharo_compile',
+  description: 'Compile (add or replace) one method in a class. source is the full method text starting with its selector line.',
+  readOnly: false,
+  inputSchema: schema({
+    className: stringProp('Class to compile into.', true),
+    source: stringProp('Full method source, e.g. "area\\n\\t^ width * height".', true),
+    protocol: stringProp('Method protocol (category), e.g. accessing.', false),
+    classSide: boolProp('Compile on the class side.', false),
+  }, ['className', 'source']),
+  async run(input, context) {
+    if (!await context.approve(pharoCompileTool, input)) return denied()
+    return evalToolResult(await compileMethod(context.config, {
+      className: String(input.className ?? ''),
+      source: String(input.source ?? ''),
+      protocol: optionalString(input.protocol),
+      classSide: input.classSide === true,
+    }, { signal: context.signal, cwd: context.cwd }), { changesImage: true })
   },
 }
 
 const pharoScriptTool: AgentTool = {
   name: 'pharo_script',
-  description: 'Run a Smalltalk .st script in the configured Pharo image.',
+  description: 'File in a Smalltalk .st script (chunk format). Live: into the running image. Headless: in a throwaway image.',
   readOnly: false,
   inputSchema: schema({ path: stringProp('Path to .st script.', true) }, ['path']),
   async run(input, context) {
     if (!await context.approve(pharoScriptTool, input)) return denied()
     const scriptPath = resolveInputPath(input.path, context)
-    return pharoResult(await runPharoScriptFile(context.config, scriptPath, { signal: context.signal, cwd: context.cwd }))
+    const result = await runSmalltalkFile(context.config, scriptPath, { signal: context.signal, cwd: context.cwd })
+    return 'backend' in result ? evalToolResult(result, { changesImage: true }) : pharoResult(result)
   },
 }
 
 const pharoTestTool: AgentTool = {
   name: 'pharo_test',
-  description: 'Run SUnit tests in the configured Pharo image.',
+  description: 'Run SUnit tests by package prefix, test class, or single selector, and report failures and errors with their messages.',
   readOnly: false,
   inputSchema: schema({
     package: stringProp('Package prefix to test.', false),
@@ -247,11 +343,25 @@ const pharoTestTool: AgentTool = {
   }),
   async run(input, context) {
     if (!await context.approve(pharoTestTool, input)) return denied()
-    return pharoResult(await runSUnit(context.config, {
+    return evalToolResult(await runSUnit(context.config, {
       package: optionalString(input.package),
       className: optionalString(input.className),
       selector: optionalString(input.selector),
     }, { signal: context.signal, cwd: context.cwd }))
+  },
+}
+
+const pharoSaveTool: AgentTool = {
+  name: 'pharo_save',
+  description: 'Save the live image to disk (like World menu > Save). Only when the user asks.',
+  readOnly: false,
+  inputSchema: schema({}),
+  async run(input, context) {
+    const resolved = await resolveBackend(context.config)
+    if (resolved.backend !== 'live') return fail('No live image is connected; headless images are never saved.')
+    if (!await context.approve(pharoSaveTool, input)) return denied()
+    const saved = await liveSave(resolved.endpoint)
+    return saved.ok ? ok({ backend: 'live', saved: true, image: saved.image ?? '' }) : fail(saved.error ?? 'Save failed')
   },
 }
 
@@ -367,10 +477,13 @@ const subagentTool: AgentTool = {
   async run(input, context) {
     const { PharoAgentLoop } = await import('./agent.ts')
     const config = input.readOnly ? { ...context.config, permissionMode: 'read-only' as const } : context.config
+    const parentEvents = context.onEvent
     const answer = await new PharoAgentLoop(config).run(String(input.prompt ?? ''), {
       cwd: context.cwd,
       signal: context.signal,
       verbose: false,
+      prompt: context.prompt,
+      onEvent: parentEvents ? event => parentEvents({ ...event, depth: (event.depth ?? 0) + 1 }) : undefined,
     })
     return ok({ answer })
   },
@@ -419,6 +532,38 @@ function pharoResult(result: { ok: boolean; stdout: string; stderr: string; exit
     data: result,
     summary: result.ok ? result.stdout.slice(0, 500) : `${result.stderr}\n${result.stdout}`.slice(0, 500),
   }
+}
+
+function evalToolResult(result: PharoEvalResult, options: { changesImage?: boolean } = {}): ToolResult {
+  const data: Record<string, unknown> = {
+    backend: result.backend,
+    ok: result.ok,
+  }
+  // A failing test run is ok=false but still carries its report in result.
+  if (result.result !== undefined) data.result = result.result
+  if (result.ok && result.resultClass) data.resultClass = result.resultClass
+  if (!result.ok && result.error) {
+    data.error = result.error
+    if (result.errorClass) data.errorClass = result.errorClass
+    if (result.stack?.length) data.stack = result.stack.slice(0, 10)
+  }
+  if (result.warnings?.length) data.warnings = result.warnings
+  if (result.output) data.output = result.output.slice(0, 4_000)
+  if (options.changesImage && result.ok && result.backend === 'headless') {
+    data.note = 'Headless mode: this change was made in a throwaway copy of the image and is already gone. Connect a live image (pharo-agent live start) to keep changes.'
+  }
+  data.durationMs = result.durationMs
+  return {
+    ok: result.ok,
+    data: data as ToolResult['data'],
+    summary: result.error && !result.ok ? result.error : (result.result ?? ''),
+  }
+}
+
+function stringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean)
+  if (typeof value === 'string') return value.split(/[\s,]+/).filter(Boolean)
+  return []
 }
 
 function resolveInputPath(value: unknown, context: ToolContext): string {

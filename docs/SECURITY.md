@@ -32,3 +32,25 @@ The LLM API itself can still point at `127.0.0.1`; this restriction only applies
 ## Shell Commands
 
 Read-only commands such as `ls`, `rg`, `git status`, and `sed -n` are treated as read-only. Commands such as `rm`, `git reset`, `npm install`, and `curl | sh` are treated as destructive.
+
+## Live Image Server
+
+`pharo-agent/smalltalk/live-server.st` lets the agent run arbitrary Smalltalk in
+your open image, which means it can run anything you can. It is locked down as
+follows:
+
+- It binds to `127.0.0.1` only, so it is not reachable from the network.
+- Every request must carry a random token (a UUID generated when the server
+  starts). The token is written to `~/.pharo-agent/live.json`, and the CLI
+  creates and keeps `~/.pharo-agent` at mode `700` so other local users cannot
+  read it.
+- Each evaluation runs in its own process with a timeout (`timeoutSeconds`,
+  default 120), so a runaway loop is terminated instead of freezing the image.
+- Every request is logged to the image's Transcript as `[pharo-agent] ...`.
+- `pharo_eval`, `pharo_compile`, `pharo_define_class`, `pharo_script`, and
+  `pharo_save` are write tools, so they follow the permission mode. In `ask`
+  mode you approve each one (or answer `a` to allow that tool for the session).
+  `pharo_save` is only offered when you ask for a save.
+
+Stop the server with `pharo-agent live stop`. Restarting it (evaluating the
+snippet again) generates a new token.

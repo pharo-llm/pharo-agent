@@ -39,6 +39,7 @@ export class OpenAICompatibleClient {
     tools?: ToolDefinition[]
     temperature?: number
     maxTokens?: number
+    signal?: AbortSignal
   }): Promise<ChatResponse> {
     const body: JsonObject = {
       model: options.model,
@@ -58,7 +59,7 @@ export class OpenAICompatibleClient {
       })) as unknown as JsonObject[]
       body.tool_choice = 'auto'
     }
-    const data = await this.request<{ choices?: { message?: { content?: unknown; tool_calls?: unknown[] } }[] }>('POST', '/chat/completions', body)
+    const data = await this.request<{ choices?: { message?: { content?: unknown; tool_calls?: unknown[] } }[] }>('POST', '/chat/completions', body, options.signal)
     const message = data.choices?.[0]?.message
     if (!message) throw new LlmError('LLM response did not include a chat message')
     return {
@@ -68,9 +69,11 @@ export class OpenAICompatibleClient {
     }
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    const abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
     try {
       const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}${path}`, {
         method,
@@ -89,9 +92,12 @@ export class OpenAICompatibleClient {
       return await response.json() as T
     } catch (error) {
       if (error instanceof LlmError) throw error
+      if (signal?.aborted) throw new LlmError('Interrupted')
+      if (controller.signal.aborted) throw new LlmError(`LLM server at ${this.baseUrl} did not answer within ${Math.round(this.timeoutMs / 1000)}s`)
       throw new LlmError(`Could not reach LLM server at ${this.baseUrl}: ${(error as Error).message}`)
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
     }
   }
 }
