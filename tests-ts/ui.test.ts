@@ -11,14 +11,14 @@ test('banner shows the logo next to version, model, Pharo backend, and workspace
     model: 'qwen-coder-7b',
     modelStatus: 'ready',
     modelUrl: 'http://127.0.0.1:8080/v1',
-    pharo: { kind: 'live', version: 'Pharo14.0.0', image: '/tmp/My.image', url: 'http://127.0.0.1:4044' },
+    pharo: { kind: 'live', name: 'My image', version: 'Pharo 14.0', detail: '127.0.0.1:4044' },
     cwd: '/tmp/project',
     permissionMode: 'ask',
   }).map(plain)
   assert.equal(lines.length, logoLines().length)
   assert.match(lines[0]!, /Pharo Agent v1\.2\.3/)
   assert.match(lines[1]!, /qwen-coder-7b/)
-  assert.match(lines[2]!, /Pharo14\.0\.0 · ● live/)
+  assert.match(lines[2]!, /My image · Pharo 14\.0 · ● live 127\.0\.0\.1:4044/)
   assert.match(lines[3]!, /\/tmp\/project/)
 })
 

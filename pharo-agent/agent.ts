@@ -190,6 +190,7 @@ Use tools whenever the answer depends on the workspace or the Pharo image. Do no
 - pharo_eval compiles the whole snippet first, so it cannot mention a class created in the same snippet. Use Smalltalk at: #ClassName, or make two calls.
 - After changing code, run the relevant tests with pharo_test.
 - Only call pharo_save when the user asks you to save the image.
+- Images are managed like Pharo Launcher does: image_list shows them (and which one is selected), image_templates lists what can be created, image_create / image_select / image_start / image_stop manage them. If the selected image is stopped, start it (image_start) before changing code so the changes are kept.
 
 Tool protocol fallback for GGUF models:
 - Call one or more tools by returning JSON only:

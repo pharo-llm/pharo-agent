@@ -15,7 +15,9 @@ or let the CLI start an image with it:
 
 Every request must carry the random token that this script writes, together
 with the port, to ~/.pharo-agent/live.json. The CLI reads that file.
-Evaluate this script again to restart the server, or run
+The server is not saved with the image: run this script again after reopening
+it (pharo-agent images start does it for you). Evaluate it again to restart
+the server with a new token, or run
 
     (Smalltalk at: #PharoAgentLive) at: #stop
 
@@ -26,14 +28,19 @@ This file is evaluated as a single chunk: it must not contain an exclamation mar
 env := [ :name |
 	[ (Smalltalk at: #OSEnvironment) current at: name ifAbsent: [ nil ] ]
 		on: Error do: [ :e | nil ] ].
-port := ((env value: 'PHARO_AGENT_PORT') ifNil: [ '4044' ]) asNumber.
+port := ((env value: 'PHARO_AGENT_PORT')
+	ifNil: [ (Smalltalk at: #PharoAgentLivePort ifAbsent: [ 4044 ]) printString ]) asNumber.
 token := (env value: 'PHARO_AGENT_TOKEN') ifNil: [ UUID new asString ].
 version := [ SystemVersion current version ] on: Error do: [ :e | 'Pharo' ].
 imagePath := [ Smalltalk imagePath ] on: Error do: [ :e | '' ].
 
 previous := Smalltalk at: #PharoAgentLive ifAbsent: [ nil ].
 (previous isDictionary and: [ (previous at: #server ifAbsent: [ nil ]) notNil ])
-	ifTrue: [ [ (previous at: #server) stop ] on: Error do: [ :e | nil ] ].
+	ifTrue: [
+		"Stop it, and unregister it: an image saved by an older version of this
+		script would otherwise have Zinc restart it with its stale token."
+		[ (previous at: #server) stop ] on: Error do: [ :e | nil ].
+		[ (previous at: #server) unregister ] on: Error do: [ :e | nil ] ].
 
 state := Dictionary new.
 state
@@ -194,21 +201,27 @@ handler := [ :request | | path route body json |
 					yourself) ]
 				ifNotNil: [
 					body := request entity ifNil: [ '{}' ] ifNotNil: [ :entity | entity contents ].
-					body isString ifFalse: [ body := body utf8Decoded ].
+					(body isKindOf: ByteArray) ifTrue: [ body := body utf8Decoded ].
+					body isString ifFalse: [ body := '' ].
 					json := [ STONJSON fromString: body ] on: Error do: [ :e | nil ].
-					json isDictionary ifFalse: [ json := Dictionary new ].
-					respond value: 200 value: (route value: json) ] ] ].
+					(json isNil and: [ request method = #POST ])
+						ifTrue: [ respond value: 400 value: (Dictionary new
+							at: 'ok' put: false;
+							at: 'error' put: 'Send a JSON body with content-type application/json';
+							yourself) ]
+						ifFalse: [
+							json isDictionary ifFalse: [ json := Dictionary new ].
+							respond value: 200 value: (route value: json) ] ] ] ].
 
 server := ZnServer on: port.
 server bindingAddress: #[127 0 0 1].
 server delegate: (ZnValueDelegate with: handler).
 server start.
-"Registered servers are restarted by Zinc when a saved image is reopened."
-server register.
+"Deliberately not registered with Zinc: a saved image must not reopen with an
+old server and token. pharo-agent starts images with a fresh one."
 state at: #server put: server.
 state at: #stop put: [
 	server stop.
-	server unregister.
 	log value: 'live server stopped' ].
 
 infoDir := FileLocator home / '.pharo-agent'.
@@ -221,8 +234,12 @@ info
 	at: 'pharo' put: version;
 	at: 'image' put: imagePath;
 	at: 'startedAt' put: DateAndTime now printString.
-(infoDir / 'live.json') ensureDelete.
-(infoDir / 'live.json') writeStreamDo: [ :stream | stream nextPutAll: (STONJSON toString: info) ].
+info at: 'pid' put: ([ (Smalltalk at: #OSPlatform) current currentProcessId ] on: Error do: [ :e | nil ]).
+"One file per running server, so several images can be live at once; live.json is the latest."
+(infoDir / 'endpoints') ensureCreateDirectory.
+{ infoDir / 'endpoints' / (port printString , '.json'). infoDir / 'live.json' } do: [ :file |
+	file ensureDelete.
+	file writeStreamDo: [ :stream | stream nextPutAll: (STONJSON toString: info) ] ].
 
 log value: 'live server listening on http://127.0.0.1:' , port printString , ' (token in ~/.pharo-agent/live.json)'.
 state

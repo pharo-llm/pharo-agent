@@ -81,7 +81,8 @@ export type BannerInfo = {
   model: string
   modelStatus: 'ready' | 'offline' | 'unknown'
   modelUrl: string
-  pharo: { kind: 'live'; version?: string; image?: string; url: string } | { kind: 'headless'; image?: string } | { kind: 'none' }
+  /** The image questions go to: live (agent server answering), stopped, or none selected. */
+  pharo: { kind: 'live' | 'stopped' | 'none'; name?: string; version?: string; detail?: string }
   cwd: string
   permissionMode: string
 }
@@ -89,20 +90,16 @@ export type BannerInfo = {
 export function bannerLines(info: BannerInfo): string[] {
   const dot = (ok: boolean) => (ok ? style.green('●') : style.red('○'))
   const modelLine = `${info.model} ${style.dim('·')} ${dot(info.modelStatus === 'ready')} ${style.dim(info.modelStatus === 'ready' ? shortUrl(info.modelUrl) : `no model server at ${shortUrl(info.modelUrl)}`)}`
-  let pharoLine: string
-  if (info.pharo.kind === 'live') {
-    pharoLine = `${info.pharo.version ?? 'Pharo'} ${style.dim('·')} ${style.green('● live')} ${style.dim(tildify(info.pharo.image ?? info.pharo.url))}`
-  } else if (info.pharo.kind === 'headless') {
-    pharoLine = `Pharo ${style.dim('·')} ${style.yellow('○ headless')} ${style.dim(`${tildify(info.pharo.image ?? '')} · /live start to connect`)}`
-  } else {
-    pharoLine = `Pharo ${style.dim('·')} ${style.red('○ not configured')} ${style.dim('· /live start or /setup')}`
-  }
+  const pharo = info.pharo
+  const pharoLine = pharo.kind === 'none'
+    ? `Pharo ${style.dim('·')} ${style.yellow('○ no image selected')} ${style.dim(`· ${pharo.detail ?? '/image'}`)}`
+    : `${pharo.name ?? 'Pharo'} ${style.dim(`· ${pharo.version ?? 'Pharo'} ·`)} ${pharo.kind === 'live' ? style.green('● live') : style.yellow('○ stopped')} ${style.dim(pharo.detail ?? '')}`
   const text = [
     `${style.bold('Pharo Agent')} ${style.dim(`v${info.version}`)}`,
     modelLine,
     pharoLine,
     style.dim(`${tildify(info.cwd)} · permissions: ${info.permissionMode}`),
-    style.dim('/help · ! shell · > Smalltalk · esc interrupts'),
+    style.dim('/image picks an image · /help · ! shell · > Smalltalk · esc interrupts'),
   ]
   const logo = logoLines()
   const rows = Math.max(logo.length, text.length)
@@ -180,6 +177,12 @@ const pharoNames: Record<string, string> = {
   pharo_test: 'Pharo test',
   pharo_script: 'Pharo file-in',
   pharo_save: 'Pharo save image',
+  image_list: 'Images',
+  image_templates: 'Image templates',
+  image_create: 'Create image',
+  image_select: 'Select image',
+  image_start: 'Start image',
+  image_stop: 'Stop image',
 }
 
 /** Header line(s) for a tool call: what is about to run, with its key input. */
@@ -216,6 +219,18 @@ export function formatToolStart(call: ToolCall, depth = 0): string {
       break
     case 'pharo_test':
       title = `${name}(${[str('className') || str('package') || 'all tests', str('selector')].filter(Boolean).join('>>#')})`
+      break
+    case 'image_create':
+      title = `${name}(${str('name')} from ${str('template')})`
+      break
+    case 'image_select':
+    case 'image_start':
+    case 'image_stop':
+      title = `${name}(${str('image') || 'selected image'}${args.headless ? ' · headless' : ''}${args.save ? ' · save' : ''})`
+      break
+    case 'image_list':
+    case 'image_templates':
+      title = `${name}(${str('filter') || (args.all ? 'whole machine' : '')})`
       break
     case 'shell':
       title = `shell(${oneLine(str('command'), 100)})`

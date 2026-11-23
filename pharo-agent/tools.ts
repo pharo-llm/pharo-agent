@@ -3,7 +3,9 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import type { AgentTool, JsonObject, ToolContext, ToolResult } from './types.ts'
 import { compileMethod, defineClass, evaluateSmalltalk, findInImage, inspectImage, methodSource, resolveBackend, runSmalltalkFile, runSUnit } from './pharo.ts'
 import type { FindKind, PharoEvalResult } from './pharo.ts'
-import { liveSave } from './live.ts'
+import { liveSave, samePath } from './live.ts'
+import { createImage, downloadVm, findImage, findTemplate, launcherLocations, listTemplates, resolveVm, versionLabel, vmVersionFor } from './launcher.ts'
+import { imageStatuses, resolveImageRef, selectImage, startPharoImage, stopPharoImage } from './image-manager.ts'
 import { collectFiles, isTextFile, readTextSlice } from './workspace.ts'
 import { appendMemory, readMemory } from './memory.ts'
 import { callMcpTool, listMcpTools } from './mcp.ts'
@@ -32,6 +34,12 @@ export function builtInTools(): AgentTool[] {
     pharoTestTool,
     pharoScriptTool,
     pharoSaveTool,
+    imageListTool,
+    imageTemplatesTool,
+    imageCreateTool,
+    imageSelectTool,
+    imageStartTool,
+    imageStopTool,
     memoryReadTool,
     memoryWriteTool,
     taskListTool,
@@ -363,6 +371,112 @@ const pharoSaveTool: AgentTool = {
     const saved = await liveSave(resolved.endpoint)
     return saved.ok ? ok({ backend: 'live', saved: true, image: saved.image ?? '' }) : fail(saved.error ?? 'Save failed')
   },
+}
+
+const imageListTool: AgentTool = {
+  name: 'image_list',
+  description: 'List the Pharo images (shared with Pharo Launcher): name, Pharo version, whether it runs and is live, and which one is selected. all: also search the whole machine.',
+  readOnly: true,
+  inputSchema: schema({ all: boolProp('Also list images outside Pharo Launcher (slower).', false) }),
+  async run(input, context) {
+    const statuses = await imageStatuses(context.config, { cwd: context.cwd, all: input.all === true })
+    return ok({
+      images: statuses.map(status => ({
+        number: status.index,
+        name: status.image.name,
+        pharo: status.image.version ? versionLabel(status.image.version) : 'unknown',
+        state: status.state,
+        selected: status.selected,
+        path: status.image.imagePath,
+        template: status.image.template ?? null,
+      })),
+    })
+  },
+}
+
+const imageTemplatesTool: AgentTool = {
+  name: 'image_templates',
+  description: 'List templates new images can be created from (official Pharo versions, Moose, ...). Use filter to narrow, e.g. "Pharo 14" or "Moose".',
+  readOnly: true,
+  inputSchema: schema({ filter: stringProp('Substring of the template or group name.', false) }),
+  async run(input) {
+    const filter = optionalString(input.filter)?.toLowerCase()
+    const templates = (await listTemplates(await launcherLocations()))
+      .filter(template => !filter || template.name.toLowerCase().includes(filter) || template.group.toLowerCase().includes(filter))
+    return ok({ templates: templates.slice(0, 80).map(template => ({ name: template.name, group: template.group })), count: templates.length })
+  },
+}
+
+const imageCreateTool: AgentTool = {
+  name: 'image_create',
+  description: 'Create a new Pharo image from a template (downloads it and its VM when needed). Does not start or select it.',
+  readOnly: false,
+  inputSchema: schema({
+    name: stringProp('New image name.', true),
+    template: stringProp('Exact template name from image_templates.', true),
+  }, ['name', 'template']),
+  async run(input, context) {
+    if (!await context.approve(imageCreateTool, input)) return denied()
+    const locations = await launcherLocations()
+    const template = findTemplate(await listTemplates(locations), String(input.template ?? ''))
+    const image = await createImage(locations, { name: String(input.name ?? ''), template })
+    const vm = await resolveVm(locations, image)
+    if (!vm.executable && vm.missingVersion) await downloadVm(locations, vmVersionFor(vm.missingVersion))
+    return ok({ created: image.name, pharo: image.version ? versionLabel(image.version) : 'unknown', path: image.imagePath })
+  },
+}
+
+const imageSelectTool: AgentTool = {
+  name: 'image_select',
+  description: 'Make an image the one all pharo_* tools work in (by number, name, or path). Start it with image_start to work live.',
+  readOnly: false,
+  inputSchema: schema({ image: stringProp('Image number, name, or .image path.', true) }, ['image']),
+  async run(input, context) {
+    if (!await context.approve(imageSelectTool, input)) return denied()
+    const image = await resolveImageRef(String(input.image ?? ''), { cwd: context.cwd })
+    await selectImage(context.config, image, { cwd: context.cwd })
+    const [status] = (await imageStatuses(context.config, { cwd: context.cwd })).filter(entry => entry.selected)
+    return ok({ selected: image.name, state: status?.state ?? 'stopped', pharo: image.version ? versionLabel(image.version) : 'unknown' })
+  },
+}
+
+const imageStartTool: AgentTool = {
+  name: 'image_start',
+  description: 'Start an image with the agent server so pharo_* tools work live in it. Opens its window unless headless. Defaults to the selected image.',
+  readOnly: false,
+  inputSchema: schema({
+    image: stringProp('Image number, name, or path. Defaults to the selected image.', false),
+    headless: boolProp('Start without a window.', false),
+  }),
+  async run(input, context) {
+    if (!await context.approve(imageStartTool, input)) return denied()
+    const image = await imageFromInput(input.image, context)
+    const started = await startPharoImage(image, { headless: input.headless === true })
+    return ok({ started: image.name, url: started.url, alreadyRunning: Boolean(started.alreadyRunning), selected: Boolean(context.config.image && await samePath(context.config.image, image.imagePath)) })
+  },
+}
+
+const imageStopTool: AgentTool = {
+  name: 'image_stop',
+  description: 'Quit a running image. Without save, unsaved changes are lost. Defaults to the selected image.',
+  readOnly: false,
+  destructive: true,
+  inputSchema: schema({
+    image: stringProp('Image number, name, or path. Defaults to the selected image.', false),
+    save: boolProp('Save the image before quitting.', false),
+  }),
+  async run(input, context) {
+    if (!await context.approve(imageStopTool, input)) return denied()
+    const image = await imageFromInput(input.image, context)
+    return ok({ image: image.name, ...await stopPharoImage(image, { save: input.save === true }) })
+  },
+}
+
+async function imageFromInput(value: unknown, context: ToolContext) {
+  const ref = optionalString(value)
+  if (ref) return resolveImageRef(ref, { cwd: context.cwd })
+  if (!context.config.image) throw new Error('No image selected: pass image, or call image_select first.')
+  return findImage(await launcherLocations(), context.config.image, context.cwd)
 }
 
 const memoryReadTool: AgentTool = {

@@ -28,14 +28,18 @@ export async function collectDiagnostics(config: AgentConfig, cwd: string, optio
       ? `${live!.pharo ?? 'Pharo'} at ${live!.url} (${live!.image ?? ''})`
       : config.pharoMode === 'headless' ? 'disabled (--pharo-mode headless)' : `${live?.error ?? 'not running'}; run pharo-agent live start or pharo-agent live snippet`,
   })
+  const { launcherLocations, listLauncherImages } = await import('./launcher.ts')
+  const locations = await launcherLocations()
+  const launcherImages = await listLauncherImages(locations)
+  checks.push({ name: 'pharo.images', ok: launcherImages.length > 0, required: false, detail: `${launcherImages.length} in ${locations.imagesDir} (${locations.origin.imagesDir})` })
   const pharo = await effectivePharoVm(config)
   const needHeadless = !liveOk
-  checks.push({ name: 'pharo.vm', ok: Boolean(pharo), required: needHeadless, detail: pharo ?? 'set PHARO_VM or configure --pharo-vm' })
+  checks.push({ name: 'pharo.vm', ok: Boolean(pharo), required: needHeadless, detail: pharo ?? (config.image ? 'no VM for this image: pharo-agent images vm download <version>' : 'chosen per image once one is selected') })
   checks.push({
     name: 'pharo.image',
     ok: Boolean(config.image && await pathExists(path.resolve(cwd, config.image))),
     required: needHeadless,
-    detail: config.image ?? 'set PHARO_IMAGE or configure --image',
+    detail: config.image ?? 'none selected: pharo-agent images use <#> (see pharo-agent images)',
   })
 
   const llama = await effectiveLlamaServer(config)

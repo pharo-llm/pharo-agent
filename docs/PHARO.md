@@ -20,6 +20,58 @@ were discarded.
 Tested on Pharo 10 and Pharo 14. The generated Smalltalk reaches version-specific
 classes only through `Smalltalk at:`, so it compiles on both.
 
+## Images and VMs
+
+pharo-agent stores images exactly as Pharo Launcher does, so both tools see the
+same images. Pharo Launcher does not need to be installed.
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Launcher settings | `~/Library/Preferences/pharo-launcher/settings.ston` | `~/.config/pharo-launcher/settings.ston` | `%APPDATA%\pharo-launcher\settings.ston` |
+| Images, VMs (default) | `~/Documents/Pharo/{images,vms}` | `~/Pharo/{images,vms}` | `%USERPROFILE%\Documents\Pharo\{images,vms}` |
+| Template cache | `~/Library/Preferences/pharo/templateCache` | `~/.config/pharo/templateCache` | `%APPDATA%\pharo\templateCache` |
+| VM executable | `Pharo.app/Contents/MacOS/Pharo` | `pharo` or `bin/pharo` | `PharoConsole.exe` (headless), `Pharo.exe` (window) |
+
+The settings file's `locationString` and `vmStoreString` override the default
+folders, and so do `PHARO_AGENT_IMAGES_DIR` and `PHARO_AGENT_VMS_DIR`.
+`pharo-agent images where` prints what is in use.
+
+- **An image** is a folder `D` of the images directory holding `D.image`.
+  Its version comes from `pharo.version`, else `meta-inf.ston`, else the
+  `.sources` file name. Its architecture comes from the image header.
+- **Templates** come from Pharo Launcher's `sources.list` (official versions,
+  Moose, Spec-Toplo, Pharo-LLM, ...), refreshed from
+  `https://files.pharo.org/pharo-launcher/sources.list` with
+  `images templates --refresh`. Your own `mysources.list` is included, and so are
+  templates already in the cache, which work offline.
+- **Creating** downloads the template into the shared cache, unpacks it as
+  `images/<name>/<name>.image`, and writes `pharo.version` and a
+  Launcher-format `meta-inf.ston`. It also downloads the VM for that version
+  from files.pharo.org if it is missing.
+- **A running image** is a VM process whose command line names the image file.
+  It is **live** when its agent server answers. Each live server writes
+  `~/.pharo-agent/endpoints/<port>.json`, so several images can be live at once.
+- **Selecting** an image (`/image`, `images use`, or the agent's `image_select`)
+  saves it as `image` in `.pharo-agent.json` when the project has one,
+  otherwise in the global config. Every Pharo call then goes to that image.
+
+### Why not drive Pharo Launcher's CLI?
+
+The [Evref-BL](https://github.com/orgs/Evref-BL/repositories) tools take two
+approaches. `pharo-launcher-mcp` runs Launcher's `clap launcher` commands, and
+`PLexus` manages images itself. pharo-agent follows the parts both agree on:
+read image folders and metadata from disk, and treat a running image as a
+process. It does not shell out to Launcher:
+
+- Launcher 3.0.x (still common) has no CLI, so the commands hang.
+- Each Launcher command boots an image, which takes seconds per command.
+- Its on-disk format is stable and simple, so writing it directly keeps both
+  tools in sync.
+
+Unlike Evref-BL's MCP, the in-image part is a single script loaded on demand.
+Nothing is installed into the image with Metacello, so it works on any image,
+including ones you already have.
+
 ## Live mode
 
 ### Connect the image you already have open
@@ -43,14 +95,15 @@ Paste it into a Playground and Do it (Cmd+D). The Transcript shows:
 Every request the agent makes is also logged in the Transcript, so you can watch
 it from inside Pharo too.
 
-### Or launch an image with the server
+### Or let pharo-agent start it
 
 ```sh
-pharo-agent configure --pharo-vm /path/to/Pharo --image /path/to/Pharo.image
-pharo-agent live start              # with the Pharo window
-pharo-agent live start --headless   # no window
-pharo-agent live start --port 4050
+pharo-agent images use "Pharo 14.0 - 64bit (next stable)"
+pharo-agent images start              # with the Pharo window
+pharo-agent images start --headless   # no window
 ```
+
+`pharo-agent live start` does the same for the selected image.
 
 ### Manage it
 
@@ -62,14 +115,17 @@ pharo-agent live stop     # stop the server; the image keeps running
 
 In the chat: `/live`, `/live start`, `/live snippet`, `/live stop`, `/save`.
 
-If you save the image with the server running, Zinc restarts the server when the
-image is reopened, using the same port and token.
+The server is not saved into the image. When pharo-agent starts an image it
+loads a fresh server with a new port and token. If you reopen an image yourself
+(from Pharo Launcher, for example), paste the snippet again.
 
 ### How it works
 
 `pharo-agent/smalltalk/live-server.st` starts a Zinc server bound to `127.0.0.1`
-(port 4044 by default, or `PHARO_AGENT_PORT`). It writes the URL and a random
-token to `~/.pharo-agent/live.json`, and the CLI reads them from there. The
+(the first free port from 4044, chosen by the CLI). It writes the URL, the image
+path and a random token to `~/.pharo-agent/endpoints/<port>.json` and to
+`~/.pharo-agent/live.json` (the latest). The CLI uses the endpoint whose image is
+the selected one. The
 endpoints are:
 
 - `GET /health`: Pharo version, image path, request count.
@@ -100,6 +156,11 @@ to point at a server explicitly.
 | `pharo_test` | Run SUnit; failures include their messages (e.g. `Got 6 instead of 7`) |
 | `pharo_script` | File in a `.st` chunk-format script |
 | `pharo_save` | Save the live image (only when asked) |
+| `image_list` | Images (Launcher's, or `all` on the machine), version, state, selected |
+| `image_templates` | Templates to create images from |
+| `image_create` | New image from a template (downloads image and VM) |
+| `image_select` | Choose the image all `pharo_*` tools work in |
+| `image_start` / `image_stop` | Open the image with the agent server / quit it (optionally saving) |
 
 Read-only tools run without asking. Write tools follow the permission mode (see
 [SECURITY.md](SECURITY.md)).

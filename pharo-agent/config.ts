@@ -132,8 +132,25 @@ export function compactConfig(config: AgentConfig): Partial<AgentConfig> {
   return result
 }
 
-export async function effectivePharoVm(config: AgentConfig): Promise<string | undefined> {
-  return config.pharoVm ?? (await which('pharo')) ?? (await which('Pharo'))
+/**
+ * The VM to run the selected image with: an explicit pharoVm; else the one
+ * Pharo Launcher would use for that image (recorded VM, then its version's);
+ * else a `pharo` on PATH.
+ */
+export async function effectivePharoVm(config: AgentConfig, options: { gui?: boolean } = {}): Promise<string | undefined> {
+  if (config.pharoVm) return config.pharoVm
+  if (config.image) {
+    const { describeImage, launcherLocations, readImageDirectory, resolveVm } = await import('./launcher.ts')
+    const imagePath = path.resolve(config.image)
+    if (existsSync(imagePath)) {
+      const fromDir = await readImageDirectory(path.dirname(imagePath))
+      const image = fromDir?.imagePath === imagePath ? fromDir : await describeImage(imagePath, 'found')
+      const resolved = await resolveVm(await launcherLocations(), image)
+      const vm = options.gui ? resolved.guiExecutable ?? resolved.executable : resolved.executable
+      if (vm) return vm
+    }
+  }
+  return (await which('pharo')) ?? (await which('Pharo'))
 }
 
 export async function effectiveLlamaServer(config: AgentConfig): Promise<string | undefined> {

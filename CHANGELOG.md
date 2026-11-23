@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Images and VMs as Pharo Launcher stores them, on macOS, Linux and Windows.
+  pharo-agent reads Launcher's settings and uses its images, VMs, templates
+  (`sources.list`, `mysources.list`) and template cache. New `pharo-agent images`
+  command: list (with running/live state; `--all` searches the machine), where,
+  use, info, templates, create (downloads the template and its VM), copy, delete,
+  start (window or headless), stop (`--save`), vms, `vm download`.
+- Chat: `/image` picker, `/image create|start|stop|copy|delete|info`, `/images`,
+  `/templates`, `/vms`. The prompt shows the selected image and whether it is live.
+  Lines typed while the agent works are queued instead of lost.
+- Agent tools: `image_list`, `image_templates`, `image_create`, `image_select`,
+  `image_start`, `image_stop`.
+- Several live images at once: each server publishes
+  `~/.pharo-agent/endpoints/<port>.json`, and Pharo calls go to the selected
+  image's server. The server is no longer registered with Zinc, so a saved
+  image never reopens with a stale server.
+- The VM is resolved per image (Launcher's recorded VM, then its version's),
+  instead of one global `pharoVm`.
+
 - Live mode: `pharo-agent/smalltalk/live-server.st` runs a token-protected Zinc
   server on 127.0.0.1 inside your open image, so the agent works on the running
   image (shared state, persistent changes, millisecond calls) without MCP.

@@ -4,6 +4,7 @@ import { readdir } from 'node:fs/promises'
 import type { AgentConfig } from './types.ts'
 import { effectiveLlamaServer } from './config.ts'
 import { pathExists, which } from './platform.ts'
+import { launcherLocations, listVms } from './launcher.ts'
 
 export type SetupDiscovery = {
   pharoVms: string[]
@@ -26,16 +27,17 @@ export async function findPharoVmCandidates(config: AgentConfig): Promise<string
     await which('pharo'),
     await which('Pharo'),
     '/Applications/Pharo.app/Contents/MacOS/Pharo',
-    path.join(os.homedir(), 'Documents/Pharo/vms/140-x64/Pharo.app/Contents/MacOS/Pharo'),
   ].filter(Boolean) as string[]
-
-  candidates.push(...await walkForNames(path.join(os.homedir(), 'Documents', 'Pharo', 'vms'), new Set(['Pharo', 'pharo']), 6, 20))
+  // Pharo Launcher's VMs, newest first (wherever its settings put them).
+  const vms = await listVms(await launcherLocations())
+  candidates.push(...vms.filter(vm => vm.executable).sort((a, b) => Number(/^\d+/.exec(b.id)?.[0] ?? 0) - Number(/^\d+/.exec(a.id)?.[0] ?? 0)).map(vm => vm.executable!))
   return uniqueExisting(candidates)
 }
 
 export async function findPharoImageCandidates(cwd: string): Promise<string[]> {
   const roots = [
     cwd,
+    (await launcherLocations()).imagesDir,
     path.join(os.homedir(), 'Documents', 'Pharo', 'images'),
     path.join(os.homedir(), 'Documents', 'Pharo'),
     path.join(os.homedir(), 'Downloads'),
@@ -67,15 +69,6 @@ async function uniqueExisting(values: string[]): Promise<string[]> {
       result.push(resolved)
     }
   }
-  return result
-}
-
-async function walkForNames(root: string, names: Set<string>, maxDepth: number, maxResults: number): Promise<string[]> {
-  const result: string[] = []
-  await walk(root, maxDepth, async entry => {
-    if (names.has(path.basename(entry))) result.push(entry)
-    return result.length < maxResults
-  })
   return result
 }
 

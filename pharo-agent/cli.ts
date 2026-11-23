@@ -7,15 +7,19 @@ import { effectivePharoVm, globalConfigPath, loadConfig, mergeConfig, modelCache
 import { AgentInterrupted, PharoAgentLoop } from './agent.ts'
 import { evaluateSmalltalk, inspectImage, runSmalltalkFile, runSUnit } from './pharo.ts'
 import type { PharoEvalResult, PharoRunResult } from './pharo.ts'
-import { liveEndpoint, liveEval, liveHealth, liveInfoFile, liveLoadSnippet, liveSave, liveServerScriptPath, startLiveImage } from './live.ts'
-import { ActivityRenderer, bannerLines, formatDuration, renderMarkdown, style, tildify } from './ui.ts'
+import { liveEndpoint, liveEval, liveHealth, liveLoadSnippet, liveSave, liveServerScriptPath, nextLivePort, samePath, startLiveImage } from './live.ts'
+import { ActivityRenderer, bannerLines, colorEnabled, formatDuration, renderMarkdown, style, tildify } from './ui.ts'
 import type { BannerInfo } from './ui.ts'
+import { copyImage, createImage, deleteImage, downloadVm, findImage, findTemplate, launcherLocations, LauncherError, listLauncherImages, listTemplates, listVms, resolveVm, versionLabel, vmVersionFor } from './launcher.ts'
+import type { LauncherLocations, PharoImage, Template } from './launcher.ts'
+import { describeVersion, imageStatuses, resolveImageRef, selectImage, shortImageName, startPharoImage, stopPharoImage, vmSummary } from './image-manager.ts'
+import type { ImageStatus } from './image-manager.ts'
 import { buildLlamaCommand, startLlamaServer } from './llama.ts'
 import { downloadGguf, downloadGgufSet, formatBytes, HuggingFaceError, listGgufFiles, listOrgModels, resolveGgufShardSet, resolveModelRef, selectGguf } from './hf.ts'
 import { builtInTools } from './tools.ts'
 import { appendMemory, clearMemory, readMemory } from './memory.ts'
 import { listSessions, loadSessionMessages, SessionRecorder } from './sessions.ts'
-import { pathExists, shellCommand, which } from './platform.ts'
+import { pathExists, resolvePath, shellCommand, which } from './platform.ts'
 import { addTask, clearCompletedTasks, readTasks, updateTask } from './task-store.ts'
 import { collectDiagnostics, diagnosticsOk } from './diagnostics.ts'
 import { discoverSetup } from './setup.ts'
@@ -34,6 +38,12 @@ type ChatState = {
   rl?: import('node:readline/promises').Interface
   /** Set while the agent (or a user ! / > command) runs; aborting it interrupts. */
   turn?: AbortController
+  /** The last /images listing, so /image 3 means what the user just saw. */
+  imageListing?: ImageStatus[]
+  /** True while a question (approval, picker) waits for an answer, so it isn't queued. */
+  asking?: boolean
+  /** True while the main prompt waits for input. Lines arriving otherwise are queued. */
+  reading?: boolean
 }
 
 const commands: Record<string, CommandFn> = {
@@ -53,6 +63,8 @@ const commands: Record<string, CommandFn> = {
   memory: memoryCommand,
   sessions: sessionsCommand,
   live: liveCommand,
+  images: imagesCommand,
+  image: imagesCommand,
   version: versionCommand,
   help: helpCommand,
 }
@@ -164,7 +176,7 @@ async function chatCommand(args: string[], global: GlobalOptions): Promise<numbe
         return
       }
       lastSigint = Date.now()
-      process.stdout.write(`\n${style.dim('(press Ctrl+C again to exit, or type /exit)')}\n${chatPrompt()}`)
+      process.stdout.write(`\n${style.dim('(press Ctrl+C again to exit, or type /exit)')}\n${style.blue('❯')} `)
     })
     process.stdin.on('keypress', (_text, key: { name?: string } | undefined) => {
       if (key?.name === 'escape' && state.turn) state.turn.abort()
@@ -173,13 +185,29 @@ async function chatCommand(args: string[], global: GlobalOptions): Promise<numbe
     rl.once('close', () => {
       closed = true
     })
+    // Lines typed while the agent works are kept and run afterwards, in order.
+    const queued: string[] = []
+    rl.on('line', line => {
+      if (!state.reading && !state.asking && line.trim()) queued.push(line)
+    })
     if (positional.length) await handleChatInput(positional.join(' '), state, global)
     while (!closed) {
       let prompt: string
-      try {
-        prompt = (await rl.question(chatPrompt())).trim()
-      } catch {
-        break
+      const next = queued.shift()
+      if (next !== undefined) {
+        prompt = next.trim()
+        process.stdout.write(`${await chatPrompt(state.config)}${prompt}\n`)
+      } else {
+        const label = await chatPrompt(state.config)
+        if (queued.length) continue
+        state.reading = true
+        try {
+          prompt = (await rl.question(label)).trim()
+        } catch {
+          break
+        } finally {
+          state.reading = false
+        }
       }
       if (!prompt) continue
       if (prompt === '/paste') prompt = await readMultilinePrompt(rl)
@@ -310,6 +338,298 @@ async function testCommand(args: string[], global: GlobalOptions): Promise<numbe
   }, { cwd: global.cwd }), Boolean(flags.json))
 }
 
+type ImageSession = {
+  config: AgentConfig
+  /** Ask the human (chat only); without it nothing is interactive. */
+  ask?: (question: string) => Promise<string>
+  /** Numbers in /image 3 refer to the last listing shown. */
+  listing?: ImageStatus[]
+  /** Tell the agent's context what changed (chat only). */
+  note?: (text: string) => void
+}
+
+const imagesUsage = `Usage: pharo-agent images [list [--all] | where | use <image> | info [image] | templates [filter] [--refresh]
+                     | create <name> --template <template> | create <name> --zip <file.zip>
+                     | copy <image> <newName> | delete <image> [--yes]
+                     | start [image] [--headless] [--no-agent] | stop [image] [--save]
+                     | vms | vm download <version>]
+<image> is a number from the list, a name (or part of one), or a path to a .image file.`
+
+async function imagesCommand(args: string[], global: GlobalOptions, session?: ImageSession): Promise<number> {
+  const known = new Set(['list', 'ls', 'where', 'use', 'select', 'info', 'templates', 'create', 'new', 'copy', 'delete', 'rm', 'start', 'launch', 'stop', 'vms', 'vm', 'help'])
+  const sub = args[0] && known.has(args[0]) ? args.shift()! : args[0] && !args[0].startsWith('--') ? 'use' : 'list'
+  const { flags, positional } = parseFlags(args)
+  const config = session?.config ?? await runtimeConfig(global, flags)
+  const locations = await launcherLocations()
+  const out = (text: string) => process.stdout.write(text)
+  const ref = (value: string | undefined) => value ? resolveImageRef(value, { cwd: global.cwd, listing: session?.listing, locations }) : undefined
+  const selectedImage = async (): Promise<PharoImage> => {
+    if (!config.image) throw new LauncherError('No image selected. Pick one with /image (chat) or pharo-agent images use <image>.')
+    return findImage(locations, resolvePath(config.image, global.cwd), global.cwd)
+  }
+
+  if (sub === 'help') {
+    out(`${imagesUsage}\n`)
+    return 0
+  }
+  if (sub === 'where') {
+    out(`${style.bold('Pharo Launcher locations')}${locations.settingsFile ? '' : style.dim(' (Pharo Launcher settings not found: defaults)')}\n`)
+    out(`  images     ${locations.imagesDir} ${style.dim(`(${locations.origin.imagesDir})`)}\n`)
+    out(`  vms        ${locations.vmsDir} ${style.dim(`(${locations.origin.vmsDir})`)}\n`)
+    out(`  templates  ${locations.sourcesFile}\n`)
+    out(`  cache      ${locations.templateCacheDir}\n`)
+    if (locations.settingsFile) out(`  settings   ${locations.settingsFile}\n`)
+    return 0
+  }
+  if (sub === 'list' || sub === 'ls') {
+    if (flags.all) out(style.dim('Searching the machine for other images…\n'))
+    const statuses = await imageStatuses(config, { cwd: global.cwd, all: Boolean(flags.all), locations })
+    if (session) session.listing = statuses
+    if (flags.json) {
+      out(`${JSON.stringify(statuses, null, 2)}\n`)
+      return 0
+    }
+    printImageTable(statuses, locations)
+    return 0
+  }
+  if (sub === 'use' || sub === 'select') {
+    let image = await ref(positional[0])
+    if (!image) {
+      if (!session?.ask) throw new LauncherError('Usage: pharo-agent images use <image>')
+      image = await pickImage(session, global, locations)
+      if (!image) return 0
+    }
+    await useImage(image, config, global, session, flags)
+    return 0
+  }
+  if (sub === 'info') {
+    const image = await ref(positional[0]) ?? await selectedImage()
+    const [status] = (await imageStatuses({ ...config, image: image.imagePath }, { cwd: global.cwd, locations })).filter(entry => entry.image.imagePath === image.imagePath)
+    out(`${style.bold(image.name)}\n`)
+    out(`  path      ${image.imagePath}\n`)
+    out(`  version   ${describeVersion(image)}${image.arch ? ` · ${image.arch}-bit` : ''}${image.formatNumber ? ` · format ${image.formatNumber}` : ''}\n`)
+    if (image.template) out(`  template  ${image.template}\n`)
+    out(`  vm        ${await vmSummary(image)}\n`)
+    out(`  state     ${status ? stateLabel(status) : 'stopped'}\n`)
+    if (image.modifiedAt) out(`  saved     ${new Date(image.modifiedAt).toLocaleString()}\n`)
+    return 0
+  }
+  if (sub === 'templates') {
+    const templates = await listTemplates(locations, { refresh: Boolean(flags.refresh) })
+    const filter = positional.join(' ').toLowerCase()
+    const shown = templates.filter(template => !filter || template.name.toLowerCase().includes(filter) || template.group.toLowerCase().includes(filter))
+    if (flags.json) {
+      out(`${JSON.stringify(shown, null, 2)}\n`)
+      return 0
+    }
+    let group = ''
+    for (const template of shown) {
+      if (template.group !== group) {
+        group = template.group
+        out(`\n${style.bold(group)}${group === 'Local templates' ? style.dim(' (already downloaded)') : ''}\n`)
+      }
+      out(`  ${template.name}\n`)
+    }
+    out(style.dim(`\n${shown.length} templates. Create one: pharo-agent images create <name> --template "<template>"\n`))
+    return 0
+  }
+  if (sub === 'create' || sub === 'new') {
+    let name = positional[0]
+    if (!name && session?.ask) name = (await session.ask('  New image name: ')).trim()
+    if (!name) throw new LauncherError(`Usage: pharo-agent images create <name> --template "<template>"`)
+    const zip = stringFlag(flags.zip)
+    const template = zip ? undefined : await chooseTemplate(locations, stringFlag(flags.template) ?? positional.slice(1).join(' '), session)
+    if (!zip && !template) return 0
+    out(`Creating ${style.bold(name)} from ${template?.name ?? zip}…\n`)
+    const image = await createImage(locations, { name, template, zipPath: zip ? path.resolve(global.cwd, zip) : undefined }, { onProgress: printProgress })
+    clearProgress()
+    out(`${style.green('✓')} Created ${style.bold(image.name)} (${describeVersion(image)}) in ${image.dir}\n`)
+    const resolved = await resolveVm(locations, image)
+    if (!resolved.executable && resolved.missingVersion) {
+      out(`Downloading the Pharo ${versionLabel(resolved.missingVersion)} VM…\n`)
+      await downloadVm(locations, vmVersionFor(resolved.missingVersion), { onProgress: printProgress })
+      clearProgress()
+    }
+    session?.note?.(`[I created the Pharo image "${image.name}" (${describeVersion(image)})]`)
+    if (flags.use || (session?.ask && /^(y|yes|)$/i.test((await session.ask(`  Work in ${image.name} now? [Y/n] `)).trim()))) {
+      await useImage(image, config, global, session, flags)
+    }
+    return 0
+  }
+  if (sub === 'copy') {
+    const image = await ref(positional[0])
+    const newName = positional.slice(1).join(' ')
+    if (!image || !newName) throw new LauncherError('Usage: pharo-agent images copy <image> <newName>')
+    const copy = await copyImage(locations, image, newName)
+    out(`${style.green('✓')} Copied ${image.name} to ${style.bold(copy.name)}\n`)
+    return 0
+  }
+  if (sub === 'delete' || sub === 'rm') {
+    const image = await ref(positional[0])
+    if (!image) throw new LauncherError('Usage: pharo-agent images delete <image>')
+    if (!flags.yes) {
+      if (!session?.ask) throw new LauncherError(`This deletes ${image.dir} for good. Add --yes to confirm.`)
+      const answer = (await session.ask(`  Delete ${style.bold(image.name)} and everything in ${image.dir}? Type the image name to confirm: `)).trim()
+      if (answer !== image.name) {
+        out('Not deleted.\n')
+        return 0
+      }
+    }
+    await deleteImage(locations, image)
+    if (config.image && await samePath(resolvePath(config.image, global.cwd), image.imagePath)) config.image = undefined
+    out(`${style.green('✓')} Deleted ${image.name}\n`)
+    return 0
+  }
+  if (sub === 'start' || sub === 'launch') {
+    const image = await ref(positional[0]) ?? await selectedImage()
+    await startAndReport(image, { headless: Boolean(flags.headless), agent: !flags['no-agent'] })
+    if (!config.image || !await samePath(resolvePath(config.image, global.cwd), image.imagePath)) {
+      if (session?.ask && /^(y|yes|)$/i.test((await session.ask(`  Work in ${image.name} now? [Y/n] `)).trim())) await useImage(image, config, global, session, { ...flags, 'no-start': true })
+    }
+    return 0
+  }
+  if (sub === 'stop') {
+    const image = await ref(positional[0]) ?? await selectedImage()
+    out(`Stopping ${image.name}${flags.save ? ' (saving first)' : ''}…\n`)
+    const result = await stopPharoImage(image, { save: Boolean(flags.save) })
+    out(`${style.green('✓')} ${image.name} ${result.saved ? 'saved and stopped' : result.killed ? 'stopped (process terminated, unsaved changes lost)' : 'stopped'}\n`)
+    session?.note?.(`[I stopped the Pharo image "${image.name}"${result.saved ? ' after saving it' : ''}]`)
+    return 0
+  }
+  if (sub === 'vms') {
+    const vms = await listVms(locations)
+    out(`${style.bold('VMs')} ${style.dim(locations.vmsDir)}\n`)
+    for (const vm of vms) out(`  ${vm.id.padEnd(10)} ${vm.executable ? style.green('✓') : style.red('✗ no executable')} ${style.dim(vm.executable ?? vm.dir)}\n`)
+    if (!vms.length) out('  (none) Download one: pharo-agent images vm download 140\n')
+    return 0
+  }
+  if (sub === 'vm') {
+    if (positional[0] !== 'download' || !positional[1]) throw new LauncherError('Usage: pharo-agent images vm download <version>   e.g. 140 for Pharo 14')
+    const vm = await downloadVm(locations, positional[1].replace('.', ''), { onProgress: printProgress })
+    clearProgress()
+    out(`${style.green('✓')} VM ${vm.id} ready: ${vm.executable}\n`)
+    return 0
+  }
+  throw new LauncherError(imagesUsage)
+}
+
+async function useImage(image: PharoImage, config: AgentConfig, global: GlobalOptions, session: ImageSession | undefined, flags: Record<string, unknown>): Promise<void> {
+  const saved = await selectImage(config, image, { cwd: global.cwd, persist: !flags['no-save'], configPath: global.configPath })
+  process.stdout.write(`${style.green('✓')} Working in ${style.bold(image.name)} ${style.dim(`(${describeVersion(image)})`)}${saved ? style.dim(` · saved in ${tildify(saved)}`) : ''}\n`)
+  const [status] = (await imageStatuses(config, { cwd: global.cwd })).filter(entry => entry.selected)
+  session?.note?.(`[I switched the agent to the Pharo image "${image.name}" (${describeVersion(image)}), currently ${status?.state ?? 'stopped'}]`)
+  if (!status || status.state === 'live' || flags['no-start']) {
+    if (status?.state === 'live') process.stdout.write(`  ${style.green('● live')} at ${status.liveUrl}: ask away.\n`)
+    return
+  }
+  if (status.state === 'running') {
+    process.stdout.write(`  ${style.yellow('● running')} without the agent server. Paste this in its Playground to connect:\n  ${style.cyan(liveLoadSnippet(await nextLivePort()))}\n`)
+    return
+  }
+  if (!session?.ask) {
+    process.stdout.write(style.dim(`  Stopped: questions run in a throwaway headless copy. Start it with: pharo-agent images start\n`))
+    return
+  }
+  const answer = (await session.ask(`  Start it? ${style.dim('[w]indow / [h]eadless / [n]o (headless copies per question)')} `)).trim().toLowerCase()
+  if (answer === 'w' || answer === 'window' || answer === 'y' || answer === 'yes' || answer === '') await startAndReport(image, { headless: false })
+  else if (answer === 'h' || answer === 'headless') await startAndReport(image, { headless: true })
+}
+
+async function startAndReport(image: PharoImage, options: { headless?: boolean; agent?: boolean }): Promise<void> {
+  process.stdout.write(`Starting ${style.bold(image.name)}${options.headless ? ' (headless)' : ''}…\n`)
+  const started = await startPharoImage(image, options)
+  if (options.agent === false) {
+    process.stdout.write(`${style.green('✓')} Started ${image.name} (pid ${started.pid ?? '?'}) without the agent server\n`)
+    return
+  }
+  process.stdout.write(`${style.green('● live')} ${started.health.pharo ?? ''} at ${started.url}${started.alreadyRunning ? style.dim(' (was already running)') : ''}\n`)
+}
+
+async function pickImage(session: ImageSession, global: GlobalOptions, locations: LauncherLocations): Promise<PharoImage | undefined> {
+  const statuses = await imageStatuses(session.config, { cwd: global.cwd, locations })
+  session.listing = statuses
+  printImageTable(statuses, locations)
+  const answer = (await session.ask!(`  Select an image ${style.dim('(number or name; enter to cancel; "all" to search the machine)')}: `)).trim()
+  if (!answer) return undefined
+  if (answer === 'all') {
+    process.stdout.write(style.dim('Searching the machine for other images…\n'))
+    session.listing = await imageStatuses(session.config, { cwd: global.cwd, all: true, locations })
+    printImageTable(session.listing, locations)
+    const second = (await session.ask!('  Select an image (number or name; enter to cancel): ')).trim()
+    return second ? resolveImageRef(second, { cwd: global.cwd, listing: session.listing, locations }) : undefined
+  }
+  return resolveImageRef(answer, { cwd: global.cwd, listing: statuses, locations })
+}
+
+async function chooseTemplate(locations: LauncherLocations, query: string, session?: ImageSession): Promise<Template | undefined> {
+  const templates = await listTemplates(locations)
+  if (!query && !session?.ask) throw new LauncherError('Pass --template "<template>" (see pharo-agent images templates)')
+  if (!query) query = (await session!.ask!(`  Template ${style.dim('(name or part of it, e.g. "Pharo 14", "Moose")')}: `)).trim()
+  if (!query) return undefined
+  try {
+    return findTemplate(templates, query)
+  } catch (error) {
+    if (!session?.ask) throw error
+    const matches = templates.filter(template => template.name.toLowerCase().includes(query.toLowerCase()))
+    if (!matches.length) throw error
+    matches.forEach((template, index) => process.stdout.write(`  ${style.cyan(String(index + 1).padStart(2))}  ${template.name} ${style.dim(`· ${template.group}`)}\n`))
+    const pick = Number((await session.ask(`  Template number: `)).trim())
+    return matches[pick - 1]
+  }
+}
+
+function stateLabel(status: ImageStatus): string {
+  if (status.state === 'live') return `${style.green('● live')} ${style.dim(status.liveUrl?.replace('http://', '') ?? '')}`
+  if (status.state === 'running') return `${style.yellow('● running')} ${style.dim('no agent server')}`
+  return style.dim('○ stopped')
+}
+
+function printImageTable(statuses: ImageStatus[], locations: LauncherLocations): void {
+  const out = (text: string) => process.stdout.write(text)
+  if (!statuses.length) {
+    out(`No images in ${locations.imagesDir}.\nCreate one: /image create (chat) or pharo-agent images create <name> --template "Pharo 14.0 - 64bit (stable)"\n`)
+    return
+  }
+  const width = Math.min(46, Math.max(...statuses.map(status => status.image.name.length)) + 2)
+  out(`${style.dim(`     #  ${'Image'.padEnd(width)}${'Pharo'.padEnd(8)}State`)}\n`)
+  let source = ''
+  for (const status of statuses) {
+    if (status.image.source !== source) {
+      source = status.image.source
+      if (source === 'found') out(style.dim(`  Other images on this machine\n`))
+    }
+    const marker = status.selected ? style.blue('❯') : ' '
+    const name = status.image.name.length > width - 2 ? `${status.image.name.slice(0, width - 3)}…` : status.image.name
+    out(`  ${marker} ${style.cyan(String(status.index).padStart(2))}  ${(status.selected ? style.bold(name) : name).padEnd(width + (status.selected && colorEnabled ? 9 : 0))}${versionLabel(status.image.version).padEnd(8)}${stateLabel(status)}\n`)
+    if (status.image.source === 'found') out(style.dim(`         ${tildify(status.image.imagePath)}\n`))
+  }
+  out(style.dim(`\n  ${locations.imagesDir} · /image <#> to work in one · /image create · /image start · /image stop\n`))
+}
+
+let progressShown = false
+function printProgress(event: { label: string; received: number; total?: number }): void {
+  if (!process.stderr.isTTY) return
+  progressShown = true
+  const mb = (bytes: number) => (bytes / 1_048_576).toFixed(1)
+  const percent = event.total ? Math.floor((event.received / event.total) * 100) : undefined
+  const bar = percent === undefined ? '' : `${'█'.repeat(Math.floor(percent / 5))}${'░'.repeat(20 - Math.floor(percent / 5))} ${percent}%`
+  process.stderr.write(`\r\x1b[2K  ↓ ${event.label}  ${bar}  ${mb(event.received)}${event.total ? `/${mb(event.total)}` : ''} MB`)
+}
+
+function clearProgress(): void {
+  if (progressShown) process.stderr.write('\r\x1b[2K')
+  progressShown = false
+}
+
+/** Split a chat command line, keeping "quoted words" together. */
+export function splitArgs(line: string): string[] {
+  const args: string[] = []
+  const pattern = /"([^"]*)"|'([^']*)'|(\S+)/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(line))) args.push(match[1] ?? match[2] ?? match[3]!)
+  return args
+}
+
 async function liveCommand(args: string[], global: GlobalOptions, sessionConfig?: AgentConfig): Promise<number> {
   const sub = args.shift() ?? 'status'
   const { flags } = parseFlags(args)
@@ -322,13 +642,14 @@ async function liveCommand(args: string[], global: GlobalOptions, sessionConfig?
     }
     process.stdout.write(`${style.yellow('○ no live image')}${health ? ` (${health.url}: ${health.error ?? 'not answering'})` : ''}\n`)
     process.stdout.write(`  mode: ${config.pharoMode}${config.pharoMode === 'auto' ? ' (falls back to a headless copy of the image)' : ''}\n\n`)
-    process.stdout.write(`Connect your open image: paste this into a Playground and Do it (Cmd+D):\n\n  ${style.cyan(liveLoadSnippet())}\n\n`)
-    process.stdout.write(`Or launch the configured image with the server: ${style.cyan('pharo-agent live start')}\n`)
+    process.stdout.write(`Connect your open image: paste this into a Playground and Do it (Cmd+D):\n\n  ${style.cyan(liveLoadSnippet(await nextLivePort()))}\n\n`)
+    process.stdout.write(`Or pick and start an image: ${style.cyan('/image')} (chat) or ${style.cyan('pharo-agent images start <image>')}\n`)
     return 1
   }
   if (sub === 'snippet') {
-    process.stdout.write(`${liveLoadSnippet()}\n`)
-    if (!flags.quiet) process.stderr.write(style.dim(`\nPaste it into a Playground of your open image and Do it (Cmd+D).\nThe server listens on 127.0.0.1:${config.livePort} and writes its token to ${tildify(liveInfoFile(config))}.\nServer source: ${liveServerScriptPath()}\n`))
+    const port = flags.port ? Number(flags.port) : await nextLivePort()
+    process.stdout.write(`${liveLoadSnippet(port)}\n`)
+    if (!flags.quiet) process.stderr.write(style.dim(`\nPaste it into a Playground of your open image and Do it (Cmd+D).\nThe server listens on 127.0.0.1:${port} and writes its token to ~/.pharo-agent/endpoints/${port}.json.\nThen select that image (/image) so questions go to it.\nServer source: ${liveServerScriptPath()}\n`))
     return 0
   }
   if (sub === 'start') {
@@ -644,6 +965,7 @@ Usage:
   pharo-agent status [--online]
   pharo-agent configure [--pharo-vm PATH] [--image IMAGE] [--model PATH_OR_REF]
   pharo-agent doctor [--online]
+  pharo-agent images [list [--all]|where|use|info|templates|create|copy|delete|start|stop|vms|vm download]
   pharo-agent live [status|start|snippet|stop|save]
   pharo-agent eval "Smalltalk code"
   pharo-agent inspect [ClassOrPackage] [--pattern text]
@@ -780,7 +1102,14 @@ async function runChatTurn(prompt: string, state: ChatState, global: GlobalOptio
       resumeMessages: trimChatHistory(state.history),
       signal: controller.signal,
       onEvent: state.renderer.handle,
-      prompt: state.rl ? question => state.rl!.question(question, { signal: controller.signal }) : undefined,
+      prompt: state.rl ? async question => {
+        state.asking = true
+        try {
+          return await state.rl!.question(question, { signal: controller.signal })
+        } finally {
+          state.asking = false
+        }
+      } : undefined,
     })
     state.renderer.stop()
     state.history = trimChatHistory(result.messages)
@@ -861,7 +1190,7 @@ function truncate(text: string, max: number): string {
 
 async function handleChatSlash(prompt: string, global: GlobalOptions, state: ChatState): Promise<boolean> {
   if (!prompt.startsWith('/')) return false
-  const [command, ...rest] = prompt.slice(1).split(/\s+/)
+  const [command, ...rest] = splitArgs(prompt.slice(1))
   if (command === 'exit' || command === 'quit') throw new ChatExit()
   if (command === 'help' || command === '?') {
     printChatHelp()
@@ -921,6 +1250,32 @@ async function handleChatSlash(prompt: string, global: GlobalOptions, state: Cha
     process.stdout.write(`Permission mode set to ${state.config.permissionMode} for this session.\n`)
     return true
   }
+  if (command === 'images' || command === 'image' || command === 'templates' || command === 'vms') {
+    const session: ImageSession = {
+      config: state.config,
+      ask: state.rl ? async question => {
+        state.asking = true
+        try {
+          return await state.rl!.question(question)
+        } finally {
+          state.asking = false
+        }
+      } : undefined,
+      listing: state.imageListing,
+      note: text => addUserContext(state, text),
+    }
+    const args = command === 'templates' ? ['templates', ...rest]
+      : command === 'vms' ? ['vms']
+      : command === 'images' ? (rest.length ? rest : ['list'])
+      : (rest.length ? rest : ['use'])
+    try {
+      await imagesCommand(args, global, session)
+    } catch (error) {
+      process.stdout.write(`${style.red('error:')} ${(error as Error).message}\n`)
+    }
+    state.imageListing = session.listing
+    return true
+  }
   if (command === 'live') return await liveCommand(rest.length ? rest : ['status'], global, state.config).then(() => true)
   if (command === 'save') return await liveCommand(['save'], global, state.config).then(() => true)
   if (command === 'sessions') return await sessionsCommand(rest.length ? rest : ['list']).then(() => true)
@@ -957,16 +1312,26 @@ async function createOptionalRecorder(title: string): Promise<SessionRecorder | 
 }
 
 async function printChatWelcome(config: AgentConfig, cwd: string): Promise<void> {
-  const [modelReady, health] = await Promise.all([
+  const [modelReady, health, locations] = await Promise.all([
     fetch(`${config.baseUrl.replace(/\/$/, '')}/models`, { signal: AbortSignal.timeout(1_500) }).then(response => response.ok).catch(() => false),
     config.pharoMode === 'headless' ? Promise.resolve(undefined) : liveHealth(config),
+    launcherLocations(),
   ])
-  const vm = await effectivePharoVm(config)
-  const pharo: BannerInfo['pharo'] = health?.ok
-    ? { kind: 'live', version: health.pharo, image: health.image, url: health.url }
-    : vm && config.image
-      ? { kind: 'headless', image: config.image }
-      : { kind: 'none' }
+  let pharo: BannerInfo['pharo']
+  if (config.image) {
+    const image = await findImage(locations, resolvePath(config.image, cwd), cwd).catch(() => undefined)
+    pharo = {
+      kind: health?.ok ? 'live' : 'stopped',
+      name: image?.name ?? shortImageName(config.image),
+      version: image ? describeVersion(image) : undefined,
+      detail: health?.ok ? health.url.replace('http://', '') : image ? '/image start to open it' : 'image file missing · /image',
+    }
+  } else if (health?.ok) {
+    pharo = { kind: 'live', name: shortImageName(health.image ?? 'image'), version: health.pharo, detail: health.url.replace('http://', '') }
+  } else {
+    const count = (await listLauncherImages(locations)).length
+    pharo = { kind: 'none', detail: count ? `/image to pick one of your ${count} images` : '/image create to make one' }
+  }
   const lines = bannerLines({
     version: VERSION,
     model: config.model ?? config.modelFile ?? (config.modelPath ? path.basename(config.modelPath) : 'default model'),
@@ -986,8 +1351,18 @@ ${row('<question>', 'Ask the agent; every tool call and result is shown as it ru
 ${row('! <command>', 'Run a shell command yourself (the agent sees the output)')}
 ${row('> <smalltalk>', 'Evaluate Smalltalk in the image yourself (also /eval)')}
 ${row('esc / Ctrl+C', 'Interrupt the agent mid-turn')}
-${row('/live [status|start|snippet|stop]', '')}
-${row('', 'Connect to a running Pharo image')}
+${style.bold('Images')} ${style.dim('(shared with Pharo Launcher)')}
+${row('/images [--all]', 'List images: version, running, live (--all: whole machine)')}
+${row('/image', 'Pick the image to work in (then start it)')}
+${row('/image <#|name>', 'Work in that image')}
+${row('/image create [name]', 'New image from a template (Pharo, Moose, …)')}
+${row('/image start|stop [#]', 'Open (window or --headless) / quit (--save)')}
+${row('/image copy|delete <#>', 'Duplicate / remove an image')}
+${row('/image info [#]', 'Path, version, VM, state')}
+${row('/templates [filter]', 'Available templates')}
+${row('/vms', 'Installed VMs')}
+${style.bold('Live connection')}
+${row('/live [status|snippet|stop]', 'Connect an image you opened yourself')}
 ${row('/save', 'Save the live image')}
 ${row('/mode [auto|live|headless]', 'Where Pharo code runs')}
 ${row('/permissions [mode]', 'ask | auto | read-only | dangerous')}
@@ -1009,8 +1384,12 @@ ${row('/exit', 'Quit')}
 `)
 }
 
-function chatPrompt(): string {
-  return `${style.blue('❯')} `
+/** `Pharo 14 dev ● ❯`: the image questions go to, green when live. */
+async function chatPrompt(config: AgentConfig): Promise<string> {
+  if (!config.image) return `${style.blue('❯')} `
+  const health = config.pharoMode === 'headless' ? undefined : await liveHealth(config, 500)
+  const dot = health?.ok ? style.green('●') : style.dim('○')
+  return `${style.dim(shortImageName(config.image, 24))} ${dot} ${style.blue('❯')} `
 }
 
 function trimChatHistory(messages: ChatMessage[], maxMessages = 40): ChatMessage[] {
@@ -1046,8 +1425,8 @@ function nextSteps(checks: { name: string; ok: boolean }[]): string[] {
   const missing = new Set(checks.filter(check => !check.ok).map(check => check.name))
   const steps: string[] = []
   if (missing.has('pharo.live')) steps.push('Connect your open image: pharo-agent live snippet (paste it in a Playground), or pharo-agent live start')
-  if (missing.has('pharo.vm')) steps.push('Run pharo-agent setup or pharo-agent configure --pharo-vm /path/to/pharo')
-  if (missing.has('pharo.image')) steps.push('Run pharo-agent setup or pharo-agent configure --image /path/to/Pharo.image')
+  if (missing.has('pharo.image')) steps.push('Pick an image: pharo-agent images, then pharo-agent images use <#> (or /image in the chat)')
+  else if (missing.has('pharo.vm')) steps.push('Download the VM for your image: pharo-agent images vm download <version>')
   if (missing.has('model.path') && missing.has('llm.api')) steps.push('Upload/download a GGUF, then run pharo-agent model download --use or pharo-agent model serve --hf <repo:file>')
   else if (missing.has('llm.api')) steps.push('Start llama.cpp with pharo-agent model serve, or set PHARO_AGENT_BASE_URL')
   return steps

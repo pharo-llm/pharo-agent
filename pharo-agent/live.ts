@@ -2,11 +2,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { chmod, mkdir, open, readFile, stat } from 'node:fs/promises'
+import { chmod, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import type { AgentConfig } from './types.ts'
 import { effectivePharoVm } from './config.ts'
 import { pathExists, resolvePath } from './platform.ts'
+import { describeImage, freePort, launcherLocations, readImageDirectory, resolveVm } from './launcher.ts'
+import type { PharoImage } from './launcher.ts'
 
 export class LiveError extends Error {}
 
@@ -58,18 +60,70 @@ export async function ensurePrivateLiveDir(dir = liveDir()): Promise<void> {
   }
 }
 
-export async function liveEndpoint(config: AgentConfig): Promise<LiveEndpoint | undefined> {
-  if (config.liveUrl) return { url: config.liveUrl.replace(/\/$/, ''), token: config.liveToken ?? '', source: 'config' }
-  const file = liveInfoFile(config)
+export type EndpointFile = { url: string; token: string; image?: string; pharo?: string; port?: number; file: string; mtimeMs: number }
+
+async function readEndpointFile(file: string): Promise<EndpointFile | undefined> {
   try {
-    const data = JSON.parse(await readFile(file, 'utf8')) as { url?: unknown; port?: unknown; token?: unknown }
+    const data = JSON.parse(await readFile(file, 'utf8')) as { url?: unknown; port?: unknown; token?: unknown; image?: unknown; pharo?: unknown }
     const url = typeof data.url === 'string' ? data.url : typeof data.port === 'number' ? `http://127.0.0.1:${data.port}` : undefined
     if (!url || typeof data.token !== 'string') return undefined
-    if (!config.liveFile) await ensurePrivateLiveDir().catch(() => undefined)
-    return { url: url.replace(/\/$/, ''), token: data.token, source: 'file' }
+    return {
+      url: url.replace(/\/$/, ''),
+      token: data.token,
+      image: typeof data.image === 'string' ? data.image : undefined,
+      pharo: typeof data.pharo === 'string' ? data.pharo : undefined,
+      port: typeof data.port === 'number' ? data.port : undefined,
+      file,
+      mtimeMs: (await stat(file)).mtimeMs,
+    }
   } catch {
     return undefined
   }
+}
+
+/** Every endpoint a live server has published, newest first (some may be stale). */
+export async function listEndpointFiles(dir = liveDir()): Promise<EndpointFile[]> {
+  const files = await readdir(path.join(dir, 'endpoints')).catch(() => [] as string[])
+  const endpoints: EndpointFile[] = []
+  for (const file of files.filter(name => name.endsWith('.json'))) {
+    const endpoint = await readEndpointFile(path.join(dir, 'endpoints', file))
+    if (endpoint) endpoints.push(endpoint)
+  }
+  return endpoints.sort((a, b) => b.mtimeMs - a.mtimeMs)
+}
+
+export async function samePath(a: string, b: string): Promise<boolean> {
+  if (a === b) return true
+  const [ra, rb] = await Promise.all([realpath(a).catch(() => path.resolve(a)), realpath(b).catch(() => path.resolve(b))])
+  return ra === rb
+}
+
+/** The newest published endpoint of the server running inside `imagePath`. */
+export async function endpointForImage(imagePath: string, endpoints?: EndpointFile[]): Promise<EndpointFile | undefined> {
+  for (const endpoint of endpoints ?? await listEndpointFiles()) {
+    if (endpoint.image && await samePath(endpoint.image, imagePath)) return endpoint
+  }
+  return undefined
+}
+
+/**
+ * Which live server to talk to: an explicit liveUrl; else the server of the
+ * selected image (config.image); else, with no image selected, the latest
+ * server started anywhere (live.json).
+ */
+export async function liveEndpoint(config: AgentConfig): Promise<LiveEndpoint | undefined> {
+  if (config.liveUrl) return { url: config.liveUrl.replace(/\/$/, ''), token: config.liveToken ?? '', source: 'config' }
+  if (config.liveFile) {
+    const endpoint = await readEndpointFile(resolvePath(config.liveFile))
+    return endpoint ? { url: endpoint.url, token: endpoint.token, source: 'file' } : undefined
+  }
+  await ensurePrivateLiveDir().catch(() => undefined)
+  if (config.image) {
+    const endpoint = await endpointForImage(resolvePath(config.image))
+    return endpoint ? { url: endpoint.url, token: endpoint.token, source: 'file' } : undefined
+  }
+  const latest = await readEndpointFile(path.join(liveDir(), 'live.json'))
+  return latest ? { url: latest.url, token: latest.token, source: 'file' } : undefined
 }
 
 export async function liveHealth(config: AgentConfig, timeoutMs = 1_500): Promise<LiveHealth | undefined> {
@@ -164,34 +218,43 @@ export type StartedLiveImage = {
 }
 
 /**
- * Launch the configured image with the live server loaded. The image keeps
- * running after the CLI exits (it is the user's image session).
+ * Launch an image with the live server loaded, on a free port. With a window
+ * by default, as Pharo Launcher would; the image keeps running after the CLI
+ * exits (it is the user's image session).
  */
-export async function startLiveImage(
-  config: AgentConfig,
-  options: { headless?: boolean; port?: number; waitSeconds?: number; cwd?: string } = {},
+export async function startImage(
+  image: PharoImage,
+  options: { headless?: boolean; port?: number; waitSeconds?: number; vm?: string; agent?: boolean } = {},
 ): Promise<StartedLiveImage> {
-  const vm = await effectivePharoVm(config)
-  if (!vm) throw new LiveError('No Pharo VM configured. Run `pharo-agent configure --pharo-vm /path/to/Pharo`.')
-  if (!config.image) throw new LiveError('No Pharo image configured. Run `pharo-agent configure --image /path/to/Pharo.image`.')
-  const image = resolvePath(config.image, options.cwd)
-  if (!await pathExists(image)) throw new LiveError(`Configured Pharo image does not exist: ${image}`)
-  const port = options.port ?? config.livePort
+  const locations = await launcherLocations()
+  let vm = options.vm
+  if (!vm) {
+    const resolved = await resolveVm(locations, image)
+    vm = options.headless ? resolved.executable : resolved.guiExecutable ?? resolved.executable
+    if (!vm) throw new LiveError(`${resolved.reason}. Download it with: pharo-agent images vm download ${resolved.missingVersion ?? '<version>'}`)
+  }
+  // A port is free when nothing listens on it; a stale endpoint file for it is
+  // simply overwritten by the new server.
+  const port = options.port ?? await freePort(4044)
   const token = randomUUID()
   await ensurePrivateLiveDir()
-  const logPath = path.join(liveDir(), 'live-image.log')
+  const logPath = path.join(liveDir(), 'logs', `${image.name.replace(/[^\w.-]+/g, '_')}.log`)
+  await mkdir(path.dirname(logPath), { recursive: true, mode: 0o700 })
   const log = await open(logPath, 'a', 0o600)
-  const args = [...(options.headless ? ['--headless'] : []), image, 'st', liveServerScriptPath()]
+  const agent = options.agent !== false
+  const args = [...(options.headless ? ['--headless'] : []), image.imagePath, ...(agent ? ['st', liveServerScriptPath()] : [])]
   const child = spawn(vm, args, {
-    cwd: path.dirname(image),
+    cwd: image.dir,
     detached: true,
     stdio: ['ignore', log.fd, log.fd],
     env: { ...process.env, PHARO_AGENT_PORT: String(port), PHARO_AGENT_TOKEN: token },
+    windowsHide: Boolean(options.headless),
   })
   child.unref()
   await log.close()
   const endpoint: LiveEndpoint = { url: `http://127.0.0.1:${port}`, token, source: 'file' }
-  const deadline = Date.now() + (options.waitSeconds ?? 60) * 1_000
+  if (!agent) return { pid: child.pid, url: '', logPath, health: { ok: false, url: '', error: 'started without the agent server' } }
+  const deadline = Date.now() + (options.waitSeconds ?? 90) * 1_000
   let exited: number | null = null
   child.once('exit', code => {
     exited = code ?? 1
@@ -206,11 +269,35 @@ export async function startLiveImage(
     }
     await new Promise(resolve => setTimeout(resolve, 400))
   }
-  throw new LiveError(`The live server did not answer on ${endpoint.url} within ${options.waitSeconds ?? 60}s. See ${logPath}`)
+  throw new LiveError(`The live server did not answer on ${endpoint.url} within ${options.waitSeconds ?? 90}s. See ${logPath}`)
+}
+
+/** Launch the configured image (config.image) with the live server. */
+export async function startLiveImage(
+  config: AgentConfig,
+  options: { headless?: boolean; port?: number; waitSeconds?: number; cwd?: string } = {},
+): Promise<StartedLiveImage> {
+  if (!config.image) throw new LiveError('No image selected. Pick one with `pharo-agent images use <name>` (see `pharo-agent images`).')
+  const imagePath = resolvePath(config.image, options.cwd)
+  if (!await pathExists(imagePath)) throw new LiveError(`Configured Pharo image does not exist: ${imagePath}`)
+  const image = await readImageDirectory(path.dirname(imagePath)).then(found => found?.imagePath === imagePath ? found : undefined) ?? await describeImage(imagePath, 'found')
+  return startImage(image, { ...options, vm: await effectivePharoVm(config, { gui: !options.headless }) })
+}
+
+/** Ask a live image to quit (optionally saving first). */
+export async function quitLiveImage(endpoint: LiveEndpoint, options: { save?: boolean } = {}): Promise<void> {
+  const code = `[ Smalltalk snapshot: ${options.save ? 'true' : 'false'} andQuit: true ] forkAt: Processor userBackgroundPriority. 'quitting'`
+  await liveEval(endpoint, code, { timeoutMs: 5_000 }).catch(() => undefined)
 }
 
 /** One line a user can paste into a Playground of an already-open image. */
-export function liveLoadSnippet(): string {
+export function liveLoadSnippet(port?: number): string {
   const file = liveServerScriptPath().replaceAll("'", "''")
-  return `Smalltalk compiler evaluate: '${file}' asFileReference contents.`
+  const choosePort = port ? `Smalltalk at: #PharoAgentLivePort put: ${port}. ` : ''
+  return `${choosePort}Smalltalk compiler evaluate: '${file}' asFileReference contents.`
+}
+
+/** The first loopback port from 4044 that nothing listens on. */
+export async function nextLivePort(start = 4044): Promise<number> {
+  return freePort(start)
 }

@@ -9,6 +9,7 @@ It gives developers a single `pharo-agent` CLI with a real local agent loop:
 - file read/write/edit/delete tools;
 - workspace glob and grep tools;
 - shell command execution with read-only detection and permission modes;
+- your Pharo Launcher images and VMs in the terminal: list, create from templates, copy, start, stop, delete, on macOS, Linux and Windows;
 - live connection to your running Pharo image (no MCP): evaluate, browse, define classes, compile methods, run SUnit, save;
 - headless fallback that boots a throwaway copy of the image for each call;
 - a terminal UI that shows every tool call, the Smalltalk it runs, and its result as it happens;
@@ -69,6 +70,55 @@ pharo-agent configure --local --image ./Pharo.image
 Model-driven file tools stay inside the current workspace by default, and the
 web fetch tool blocks localhost/private-network targets unless explicitly
 enabled. See [docs/SECURITY.md](docs/SECURITY.md).
+
+## Your Pharo Images (Pharo Launcher In The Terminal)
+
+pharo-agent finds the images and VMs you already have. It reads Pharo
+Launcher's own settings (`~/Library/Preferences/pharo-launcher/settings.ston`
+on macOS, `~/.config/pharo-launcher/` on Linux, `%APPDATA%\pharo-launcher\`
+on Windows) and uses the same folders: `images/`, `vms/`, template list and
+template cache. Images you create here show up in Pharo Launcher, and the other
+way round. Pharo Launcher itself doesn't have to be installed.
+
+In the chat, everything happens from one prompt:
+
+```text
+❯ /image                      pick the image to work in, then start it
+     #  Image                             Pharo   State
+     1  Pharo 10.0 - 64bit                10.0    ○ stopped
+  ❯  2  Pharo 14.0 - 64bit (next stable)  14.0    ● live 127.0.0.1:4044
+❯ /image create               name + template (Pharo 14, Moose, …), downloads image and VM
+❯ /image start [--headless]   open it (window by default) with the agent connected
+Pharo 14.0 - 64bit … ● ❯ which classes in my package have no tests?
+❯ /image stop --save          save and quit
+```
+
+The prompt shows the image your questions go to (● live, ○ stopped). The agent
+can do the same itself with its `image_list`, `image_templates`,
+`image_create`, `image_select`, `image_start` and `image_stop` tools. For
+example, ask it to "create a Moose 13 image and load my baseline into it".
+
+From the shell:
+
+```sh
+pharo-agent images                      # list (--all: also images elsewhere on the machine)
+pharo-agent images where                # where images, VMs and templates live
+pharo-agent images templates "Pharo 14"
+pharo-agent images create MyProject --template "Pharo 14.0 - 64bit (stable)"
+pharo-agent images use MyProject        # the image questions go to (saved in config)
+pharo-agent images start                # window; --headless for none
+pharo-agent images info
+pharo-agent images copy MyProject "MyProject backup"
+pharo-agent images stop --save
+pharo-agent images delete "MyProject backup" --yes
+pharo-agent images vms                  # installed VMs
+pharo-agent images vm download 140      # VM for Pharo 14 (normally automatic)
+```
+
+Each image runs on the VM Pharo Launcher would choose: the one recorded in its
+`meta-inf.ston`, else a VM shipped next to it, else `<version>-x64`, else the
+closest newer 64-bit VM. Several images can run and be live at the same time,
+each on its own port.
 
 ## Talk To Your Running Image (Live Mode)
 
