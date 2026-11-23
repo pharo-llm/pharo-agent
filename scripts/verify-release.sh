@@ -10,5 +10,5 @@ node pharo-agent/cli.ts version
 npm test
 npm run smoke
 npm run pack:dry-run >/dev/null
-sh -n install.sh scripts/install.sh scripts/verify-release.sh
+sh -n scripts/*.sh
 echo "release verification passed"

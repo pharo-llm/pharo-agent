@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { builtInModelPresets, findModelPreset, loadModelPresets, modelReference, modelShardFiles } from '../pharo-agent/models.ts'
+import { builtInModelPresets, findModelPreset, loadModelPresets, modelReference, modelShardFiles } from '../../pharo-agent/models.ts'
 
 test('exposes qwen-coder-7b as a friendly built-in model name', () => {
   const preset = findModelPreset('qwen-coder-7b', builtInModelPresets)

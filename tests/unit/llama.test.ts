@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { defaultConfig } from '../pharo-agent/config.ts'
-import { buildLlamaCommand } from '../pharo-agent/llama.ts'
+import { defaultConfig } from '../../pharo-agent/config.ts'
+import { buildLlamaCommand } from '../../pharo-agent/llama.ts'
 
 test('print command can be built on CI without llama-server installed', async () => {
   const previousPath = process.env.PATH

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { parseSton } from '../pharo-agent/ston.ts'
+import { parseSton } from '../../pharo-agent/ston.ts'
 import {
   copyImage,
   createImage,
@@ -25,8 +25,8 @@ import {
   vmDownloadUrl,
   vmExecutables,
   vmVersionFor,
-} from '../pharo-agent/launcher.ts'
-import { splitArgs } from '../pharo-agent/cli.ts'
+} from '../../pharo-agent/launcher.ts'
+import { splitArgs } from '../../pharo-agent/cli.ts'
 
 test('reads STON as Pharo Launcher writes it', () => {
   const value = parseSton(`PhLImage {

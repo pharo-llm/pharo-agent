@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `pharo_define_class` refuses to replace a class that already exists in
+  another package (for example `Stack`). Redefining it broke the image.
+  `replaceExisting: true` overrides this, only when asked.
+- When a model returns an empty reply mid-task, the agent asks it to continue
+  (up to twice) instead of ending the turn with no answer. `<think>` blocks are
+  not taken as answers.
+- README rewritten: short, task-focused, with screenshots.
+
 - Images and VMs as Pharo Launcher stores them, on macOS, Linux and Windows.
   pharo-agent reads Launcher's settings and uses its images, VMs, templates
   (`sources.list`, `mysources.list`) and template cache. New `pharo-agent images`

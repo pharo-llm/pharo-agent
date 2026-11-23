@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
-import { defaultConfig } from '../pharo-agent/config.ts'
+import { defaultConfig } from '../../pharo-agent/config.ts'
 import {
   chunkSafe,
   compileExpression,
@@ -18,7 +18,7 @@ import {
   resolveBackend,
   runSUnit,
   testExpression,
-} from '../pharo-agent/pharo.ts'
+} from '../../pharo-agent/pharo.ts'
 
 test('headless eval script embeds code as a string literal and stays one chunk', () => {
   const script = headlessEvalScript("Transcript show: 'hello!'; cr.")
@@ -126,4 +126,11 @@ test('a failing SUnit report is not ok but keeps the report', async () => {
     assert.equal(result.ok, false)
     assert.match(result.result ?? '', /Got 6 instead of 7/)
   })
+})
+
+test('defining a class refuses to replace one from another package', () => {
+  const guarded = defineClassExpression({ name: 'Stack', slots: ['items'], package: 'Demo' })
+  assert.match(guarded, /existing := Smalltalk globals at: 'Stack' asSymbol ifAbsent:/)
+  assert.match(guarded, /Choose another class name/)
+  assert.doesNotMatch(defineClassExpression({ name: 'Stack', package: 'Demo', replaceExisting: true }), /Choose another class name/)
 })

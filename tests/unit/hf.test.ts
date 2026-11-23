@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { choosePreferred, resolveModelRef, splitGgufFilename, type GgufFile } from '../pharo-agent/hf.ts'
-import { defaultConfig } from '../pharo-agent/config.ts'
+import { choosePreferred, resolveModelRef, splitGgufFilename, type GgufFile } from '../../pharo-agent/hf.ts'
+import { defaultConfig } from '../../pharo-agent/config.ts'
 
 test('prefers Q4_K_M GGUF', () => {
   const files: GgufFile[] = [

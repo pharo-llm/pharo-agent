@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseToolCalls } from '../pharo-agent/agent.ts'
+import { parseToolCalls } from '../../pharo-agent/agent.ts'
 
 test('parses single fallback tool call', () => {
   assert.deepEqual(parseToolCalls('{"tool":"pharo_inspect","arguments":{"target":"Object"}}'), [

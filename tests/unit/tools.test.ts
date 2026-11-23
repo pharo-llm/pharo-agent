@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { builtInTools } from '../pharo-agent/tools.ts'
+import { builtInTools } from '../../pharo-agent/tools.ts'
 
 test('registers the expected local agent tool surface', () => {
   const names = builtInTools().map(tool => tool.name)

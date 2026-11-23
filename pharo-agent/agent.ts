@@ -36,6 +36,9 @@ export type AgentRunOptions = {
   prompt?: Prompter
 }
 
+/** How many empty replies in a row the loop nudges before giving up. */
+const maxEmptyReplies = 2
+
 /** Keep one huge tool result from flooding a small local model's context. */
 const maxToolResultChars = 24_000
 
@@ -84,6 +87,7 @@ export class PharoAgentLoop {
     ]
     await options.recorder?.record({ type: 'message', message: messages.at(-1)!, timestamp: new Date().toISOString() })
     const emit = options.onEvent ?? (() => undefined)
+    let emptyReplies = 0
     const checkAborted = () => {
       if (options.signal?.aborted) throw new AgentInterrupted()
     }
@@ -106,9 +110,18 @@ export class PharoAgentLoop {
       } finally {
         emit({ type: 'model_end', iteration, durationMs: Date.now() - started })
       }
-      const content = response.content.trim()
+      // Reasoning models may wrap their thinking in <think> tags: it is not an answer.
+      const content = response.content.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim()
       if (options.verbose) process.stderr.write(`[iteration ${iteration}] ${content}\n`)
       const calls = response.toolCalls.length ? response.toolCalls : parseToolCalls(content)
+      if (calls.length === 0 && !content && emptyReplies < maxEmptyReplies) {
+        // Small local models sometimes stop mid-task with an empty reply. Ask them to
+        // go on instead of ending the turn with no answer.
+        emptyReplies += 1
+        messages.push({ role: 'user', content: 'Your last reply was empty. Continue the task: call the next tool, or give your final answer if the task is done.' })
+        continue
+      }
+      emptyReplies = 0
       if (calls.length === 0) {
         messages.push({ role: 'assistant', content })
         await options.recorder?.record({ type: 'message', message: messages.at(-1)!, timestamp: new Date().toISOString() })

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { defaultConfig } from '../pharo-agent/config.ts'
-import { AgentInterrupted, PharoAgentLoop } from '../pharo-agent/agent.ts'
+import { defaultConfig } from '../../pharo-agent/config.ts'
+import { AgentInterrupted, PharoAgentLoop } from '../../pharo-agent/agent.ts'
 
 test('runTurn carries chat history across prompts', async () => {
   const bodies: { messages?: { role?: string }[] }[] = []
@@ -78,6 +78,29 @@ test('aborting the signal interrupts the turn', async () => {
       },
     })
     await assert.rejects(loop.runTurn('go', { cwd, signal: controller.signal }), AgentInterrupted)
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+test('an empty reply mid-task makes the agent continue instead of stopping', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'pharo-agent-loop-'))
+  try {
+    const replies = ['', '<think>hmm</think>', 'All done.']
+    const sent: string[] = []
+    const loop = new PharoAgentLoop(defaultConfig(), [], {
+      async models() {
+        return ['fake-model']
+      },
+      async chat(options) {
+        sent.push(String(options.messages.at(-1)?.content))
+        return { content: replies.shift()!, toolCalls: [], raw: {} }
+      },
+    })
+    const result = await loop.runTurn('go', { cwd })
+    assert.equal(result.answer, 'All done.')
+    assert.equal(sent.length, 3)
+    assert.match(sent[1]!, /last reply was empty/)
   } finally {
     await rm(cwd, { recursive: true, force: true })
   }

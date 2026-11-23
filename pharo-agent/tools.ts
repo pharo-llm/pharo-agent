@@ -281,7 +281,7 @@ const pharoFindTool: AgentTool = {
 
 const pharoDefineClassTool: AgentTool = {
   name: 'pharo_define_class',
-  description: 'Create a class, or redefine an existing one (existing methods are kept). Works on every Pharo version.',
+  description: 'Create a class, or redefine one of the package\'s own classes (existing methods are kept). Refuses to replace a class that already exists in another package (e.g. Stack, Set): pick another name. Works on every Pharo version.',
   readOnly: false,
   inputSchema: schema({
     name: stringProp('Class name.', true),
@@ -291,6 +291,7 @@ const pharoDefineClassTool: AgentTool = {
     package: stringProp('Package name, e.g. MyProject-Core.', true),
     tag: stringProp('Optional package tag.', false),
     comment: stringProp('Optional class comment.', false),
+    replaceExisting: boolProp('Redefine a class that already exists in another package. Only when the user explicitly asks.', false),
   }, ['name', 'package']),
   async run(input, context) {
     if (!await context.approve(pharoDefineClassTool, input)) return denied()
@@ -302,6 +303,7 @@ const pharoDefineClassTool: AgentTool = {
       package: String(input.package ?? ''),
       tag: optionalString(input.tag),
       comment: optionalString(input.comment),
+      replaceExisting: input.replaceExisting === true,
     }, { signal: context.signal, cwd: context.cwd }), { changesImage: true })
   },
 }

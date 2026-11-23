@@ -348,13 +348,26 @@ export type ClassDefinition = {
   package: string
   tag?: string
   comment?: string
+  /** Allow redefining a class that already exists in another package. */
+  replaceExisting?: boolean
 }
 
 export function defineClassExpression(input: ClassDefinition): string {
   // Literal arrays only hold literals: use quoted symbol literals (#'name').
   const symbols = (names: string[] = []) => `#( ${names.filter(Boolean).map(name => `#${stLiteral(name)}`).join(' ')} )`
-  return `| superclass cls |
-superclass := ${lookupClass(input.superclass || 'Object')}.
+  // Redefining a system class (Stack, Set, Point, ...) with new slots or another
+  // superclass breaks the image: only redefine classes of the target package
+  // unless explicitly asked to.
+  const guard = input.replaceExisting ? '' : `existing := Smalltalk globals at: ${stSymbol(input.name)} ifAbsent: [ nil ].
+existing ifNotNil: [ | owner |
+  owner := (existing isBehavior and: [ existing respondsTo: #package ])
+    ifTrue: [ [ existing package name asString ] on: Error do: [ :e | '' ] ]
+    ifFalse: [ '' ].
+  (owner = ${stLiteral(input.package)} or: [ owner beginsWith: ${stLiteral(`${input.package}-`)} ]) ifFalse: [
+    Error signal: ${stLiteral(`${input.name} already exists`)} , (owner isEmpty ifTrue: [ ' (a global that is not one of your classes)' ] ifFalse: [ ' in package ' , owner ]) , ${stLiteral('. Choose another class name; redefining it would change a class other code relies on.')} ] ].
+`
+  return `| superclass cls existing |
+${guard}superclass := ${lookupClass(input.superclass || 'Object')}.
 superclass ifNil: [ Error signal: ${stLiteral(`Superclass not found: ${input.superclass}`)} ].
 cls := Smalltalk classInstaller make: [ :builder |
   builder

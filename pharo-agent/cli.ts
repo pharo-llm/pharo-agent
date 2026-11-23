@@ -406,7 +406,7 @@ async function imagesCommand(args: string[], global: GlobalOptions, session?: Im
     const image = await ref(positional[0]) ?? await selectedImage()
     const [status] = (await imageStatuses({ ...config, image: image.imagePath }, { cwd: global.cwd, locations })).filter(entry => entry.image.imagePath === image.imagePath)
     out(`${style.bold(image.name)}\n`)
-    out(`  path      ${image.imagePath}\n`)
+    out(`  path      ${tildify(image.imagePath)}\n`)
     out(`  version   ${describeVersion(image)}${image.arch ? ` · ${image.arch}-bit` : ''}${image.formatNumber ? ` · format ${image.formatNumber}` : ''}\n`)
     if (image.template) out(`  template  ${image.template}\n`)
     out(`  vm        ${await vmSummary(image)}\n`)
@@ -443,7 +443,7 @@ async function imagesCommand(args: string[], global: GlobalOptions, session?: Im
     out(`Creating ${style.bold(name)} from ${template?.name ?? zip}…\n`)
     const image = await createImage(locations, { name, template, zipPath: zip ? path.resolve(global.cwd, zip) : undefined }, { onProgress: printProgress })
     clearProgress()
-    out(`${style.green('✓')} Created ${style.bold(image.name)} (${describeVersion(image)}) in ${image.dir}\n`)
+    out(`${style.green('✓')} Created ${style.bold(image.name)} (${describeVersion(image)}) in ${tildify(image.dir)}\n`)
     const resolved = await resolveVm(locations, image)
     if (!resolved.executable && resolved.missingVersion) {
       out(`Downloading the Pharo ${versionLabel(resolved.missingVersion)} VM…\n`)
@@ -603,7 +603,7 @@ function printImageTable(statuses: ImageStatus[], locations: LauncherLocations):
     out(`  ${marker} ${style.cyan(String(status.index).padStart(2))}  ${(status.selected ? style.bold(name) : name).padEnd(width + (status.selected && colorEnabled ? 9 : 0))}${versionLabel(status.image.version).padEnd(8)}${stateLabel(status)}\n`)
     if (status.image.source === 'found') out(style.dim(`         ${tildify(status.image.imagePath)}\n`))
   }
-  out(style.dim(`\n  ${locations.imagesDir} · /image <#> to work in one · /image create · /image start · /image stop\n`))
+  out(style.dim(`\n  ${tildify(locations.imagesDir)} · /image <#> to work in one · /image create · /image start · /image stop\n`))
 }
 
 let progressShown = false

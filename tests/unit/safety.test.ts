@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
-import { defaultConfig } from '../pharo-agent/config.ts'
-import { assertUrlAllowed, isInsideWorkspace, isPrivateOrLocalHost, resolveWorkspacePath, SafetyError } from '../pharo-agent/safety.ts'
+import { defaultConfig } from '../../pharo-agent/config.ts'
+import { assertUrlAllowed, isInsideWorkspace, isPrivateOrLocalHost, resolveWorkspacePath, SafetyError } from '../../pharo-agent/safety.ts'
 
 test('keeps model file tools inside the workspace by default', () => {
   const cwd = path.resolve('/tmp/project')

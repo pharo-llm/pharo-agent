@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { bannerLines, formatToolEnd, formatToolStart, logoLines } from '../pharo-agent/ui.ts'
+import { bannerLines, formatToolEnd, formatToolStart, logoLines } from '../../pharo-agent/ui.ts'
 
 // Tests run without a TTY, so output is uncolored.
 const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, '')
@@ -47,7 +47,7 @@ test('failed Pharo calls show the error class and stack', () => {
 })
 
 test('compile headers name the method being compiled', async () => {
-  const { selectorFromSource } = await import('../pharo-agent/ui.ts')
+  const { selectorFromSource } = await import('../../pharo-agent/ui.ts')
   assert.equal(selectorFromSource('increment\n\tcount := count + 1'), 'increment')
   assert.equal(selectorFromSource('at: index put: value\n\t^ value'), 'at:put:')
   assert.equal(selectorFromSource('+ other\n\t^ self'), '+')

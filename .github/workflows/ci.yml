@@ -23,7 +23,7 @@ jobs:
       - run: npm test
       - run: npm run smoke
       - run: npm run pack:dry-run
-      - run: sh -n install.sh scripts/install.sh scripts/verify-release.sh
+      - run: sh -n scripts/*.sh
 
   e2e:
     name: Optional Pharo E2E

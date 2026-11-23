@@ -52,5 +52,9 @@ follows:
   mode you approve each one (or answer `a` to allow that tool for the session).
   `pharo_save` is only offered when you ask for a save.
 
+`pharo_define_class` will not replace a class that already exists in another
+package (a system class such as `Stack`, for example). Redefining one with new
+slots or another superclass breaks everything that uses it.
+
 Stop the server with `pharo-agent live stop`. Restarting it (evaluating the
 snippet again) generates a new token.

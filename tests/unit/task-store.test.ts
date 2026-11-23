@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { addTask, clearCompletedTasks, readTasks, updateTask } from '../pharo-agent/task-store.ts'
+import { addTask, clearCompletedTasks, readTasks, updateTask } from '../../pharo-agent/task-store.ts'
 
 test('stores project tasks in XDG state', async () => {
   const oldState = process.env.XDG_STATE_HOME

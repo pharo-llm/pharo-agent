@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { defaultConfig } from '../pharo-agent/config.ts'
-import { approveTool, isDestructiveShellCommand, isReadOnlyShellCommand } from '../pharo-agent/permissions.ts'
+import { defaultConfig } from '../../pharo-agent/config.ts'
+import { approveTool, isDestructiveShellCommand, isReadOnlyShellCommand } from '../../pharo-agent/permissions.ts'
 
 test('classifies shell command risk', () => {
   assert.equal(isReadOnlyShellCommand('git status --short'), true)
