@@ -24,6 +24,7 @@ export function defaultConfig(): AgentConfig {
     permissionMode: 'ask',
     allowOutsideWorkspace: false,
     allowPrivateNetwork: false,
+    autoStartModel: true,
   }
 }
 
@@ -46,15 +47,44 @@ export function modelCacheDir(config: AgentConfig): string {
   return config.modelCacheDir ?? path.join(xdgCacheDir(), 'models')
 }
 
+/** Keys a project's .pharo-agent.json may not set: trust is the user's call. */
+const globalOnlyKeys: (keyof AgentConfig)[] = ['trustedFolders', 'onboarded']
+let warnedUntrusted = false
+
 export async function loadConfig(options: { configPath?: string; cwd?: string } = {}): Promise<AgentConfig> {
-  let config = defaultConfig()
-  config = mergeConfig(config, await readJsonFile<Partial<AgentConfig>>(options.configPath ?? globalConfigPath(), {}))
+  const globalFile = options.configPath ?? globalConfigPath()
+  const globalValues = await readJsonFile<Partial<AgentConfig>>(globalFile, {})
+  let config = mergeConfig(defaultConfig(), globalValues)
   const local = projectConfigPath(options.cwd)
-  if (local && local !== (options.configPath ?? globalConfigPath())) {
-    config = mergeConfig(config, await readJsonFile<Partial<AgentConfig>>(local, {}))
+  if (local && local !== globalFile) {
+    // A cloned repository could otherwise switch permissions to dangerous or add
+    // MCP commands: its config only applies once the user trusted the folder.
+    if (isTrustedFolder(path.dirname(local), globalValues.trustedFolders)) {
+      const values = await readJsonFile<Partial<AgentConfig>>(local, {})
+      for (const key of globalOnlyKeys) delete values[key]
+      config = mergeConfig(config, values)
+    } else if (!warnedUntrusted) {
+      warnedUntrusted = true
+      process.stderr.write(`pharo-agent: ignoring ${local} until you trust this folder (run pharo-agent here).\n`)
+    }
   }
   config = mergeConfig(config, envConfig())
   return config
+}
+
+export function isTrustedFolder(folder: string, trusted: string[] = []): boolean {
+  const target = path.resolve(folder)
+  return trusted.some(entry => {
+    const root = path.resolve(entry)
+    return target === root || target.startsWith(root.endsWith(path.sep) ? root : root + path.sep)
+  })
+}
+
+export async function trustFolder(folder: string, configPath = globalConfigPath()): Promise<void> {
+  const current = await readJsonFile<Partial<AgentConfig>>(configPath, {})
+  const list = new Set(current.trustedFolders ?? [])
+  list.add(path.resolve(folder))
+  await updateConfigFile(configPath, { trustedFolders: [...list] })
 }
 
 export async function loadConfigFile(file: string): Promise<AgentConfig> {

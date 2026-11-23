@@ -5,49 +5,39 @@ Pharo Agent is a zero-dependency TypeScript CLI. It runs directly on Node.js 22.
 ## Install
 
 ```sh
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/pharo-llm/pharo-agent/main/scripts/install.sh | sh
 ```
 
-The installer copies this repository into `~/.local/share/pharo-agent` and creates `~/.local/bin/pharo-agent`.
-
-## Check Your Setup
-
-```sh
-pharo-agent doctor
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/pharo-llm/pharo-agent/main/scripts/install.ps1 | iex
 ```
 
-It reports the model server, your Pharo Launcher images, and the selected image.
+The installer copies pharo-agent to `~/.local/share/pharo-agent` (or
+`%LOCALAPPDATA%\pharo-agent`) and adds `pharo-agent` to your PATH, in your shell's
+rc file or your Windows user PATH. When it runs in a terminal, it then starts
+setup. Options: `PHARO_AGENT_NO_MODIFY_PATH=1`, `PHARO_AGENT_NO_SETUP=1`.
 
-## Pick An Image
+## Setup
 
-pharo-agent uses Pharo Launcher's images and VMs (see [PHARO.md](PHARO.md)):
+Setup runs by itself the first time (from the installer, or on your first
+`pharo-agent`). Run it again anytime with `pharo-agent setup`, or `/setup` in
+the chat.
 
-```sh
-pharo-agent images                       # what you have
-pharo-agent images use 2                 # work in image #2
-pharo-agent images create MyApp --template "Pharo 14.0 - 64bit (stable)" --use
-pharo-agent images start                 # open it with the agent connected
-```
+| Step | What it does |
+|---|---|
+| Trust | The current folder is added to your trusted folders. A project's `.pharo-agent.json` and `.mcp.json` are only used in trusted folders. Each new folder asks once. |
+| Model | Lists models from running Ollama (11434), llama.cpp (8080) and LM Studio (1234) servers. It can also download Qwen2.5-Coder 7B for llama.cpp, which is then started automatically when the chat needs it, or take any OpenAI-compatible URL (with an API key). |
+| Permissions | `ask` (approve each change), `auto` (still asks before destructive steps), or `read-only` |
+| MCP | Off, the project's `.mcp.json`, Evref-BL's PLexus (`npx @evref-bl/plexus mcp`), or a config file |
+| Image | Your Pharo Launcher images, images found elsewhere, or a new one from a template |
+| VM | The image's recorded or matching VM. Only compatible VMs are offered, and a missing one is downloaded |
+| Start | With a window, headless, or later |
 
-In the chat, `/image` does all of this interactively.
-
-## Start A Model
-
-Any OpenAI-compatible server works. The built-in llama.cpp flow:
-
-```sh
-pharo-agent model download qwen-coder-7b --use
-pharo-agent model serve
-```
-
-Or an existing server, for example Ollama:
-
-```sh
-export PHARO_AGENT_BASE_URL=http://127.0.0.1:11434/v1
-export PHARO_AGENT_MODEL=qwen3:4b
-```
-
-See [MODELS.md](MODELS.md).
+Answers go to `~/.config/pharo-agent/config.json`. Environment variables still
+override them (`PHARO_AGENT_BASE_URL`, `PHARO_AGENT_MODEL`, `PHARO_IMAGE`, …),
+but you don't need any.
 
 ## Run The Agent
 
@@ -72,7 +62,7 @@ pharo-agent test --package MyApp
 
 ## Configuration
 
-`pharo-agent setup` writes the global config (`~/.config/pharo-agent/config.json`),
-or `.pharo-agent.json` in the project with `--local`. Environment variables
-override it: `PHARO_AGENT_BASE_URL`, `PHARO_AGENT_MODEL`, `PHARO_IMAGE`,
-`PHARO_VM`, `PHARO_AGENT_PERMISSION_MODE`, `PHARO_AGENT_PHARO_MODE`.
+`~/.config/pharo-agent/config.json` holds the setup answers. A project can add
+`.pharo-agent.json` (applied only in trusted folders). Every key can be
+overridden with an environment variable, for example `PHARO_AGENT_MODEL`,
+`PHARO_AGENT_PERMISSION_MODE` or `PHARO_AGENT_PHARO_MODE`.

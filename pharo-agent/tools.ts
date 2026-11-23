@@ -241,7 +241,7 @@ const pharoEvalTool: AgentTool = {
   }, ['code']),
   async run(input, context) {
     if (!await context.approve(pharoEvalTool, input)) return denied()
-    return evalToolResult(await evaluateSmalltalk(context.config, String(input.code ?? ''), { ui: input.ui === true, signal: context.signal, cwd: context.cwd }))
+    return evalToolResult(await evaluateSmalltalk(context.config, unescapeModelCode(String(input.code ?? '')), { ui: input.ui === true, signal: context.signal, cwd: context.cwd }))
   },
 }
 
@@ -322,7 +322,7 @@ const pharoCompileTool: AgentTool = {
     if (!await context.approve(pharoCompileTool, input)) return denied()
     return evalToolResult(await compileMethod(context.config, {
       className: String(input.className ?? ''),
-      source: String(input.source ?? ''),
+      source: unescapeModelCode(String(input.source ?? '')),
       protocol: optionalString(input.protocol),
       classSide: input.classSide === true,
     }, { signal: context.signal, cwd: context.cwd }), { changesImage: true })
@@ -674,6 +674,35 @@ function evalToolResult(result: PharoEvalResult, options: { changesImage?: boole
     data: data as ToolResult['data'],
     summary: result.error && !result.ok ? result.error : (result.result ?? ''),
   }
+}
+
+/**
+ * Small models sometimes double-escape code: "deposit: x\\n\\tbalance := x" arrives
+ * with a literal backslash-n instead of a line break. When the text has no real
+ * line break but has \\n or \\t outside Smalltalk string literals, unescape them.
+ */
+export function unescapeModelCode(code: string): string {
+  if (code.includes('\n')) return code
+  let outsideQuotes = ''
+  let inString = false
+  for (const char of code) {
+    if (char === "'") inString = !inString
+    else if (!inString) outsideQuotes += char
+  }
+  if (!/\\[nt]/.test(outsideQuotes)) return code
+  let result = ''
+  inString = false
+  for (let i = 0; i < code.length; i += 1) {
+    const char = code[i]!
+    if (char === "'") inString = !inString
+    if (!inString && char === '\\' && (code[i + 1] === 'n' || code[i + 1] === 't')) {
+      result += code[i + 1] === 'n' ? '\n' : '\t'
+      i += 1
+      continue
+    }
+    result += char
+  }
+  return result
 }
 
 function stringArray(value: unknown): string[] {

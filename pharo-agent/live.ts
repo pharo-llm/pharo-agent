@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { AgentConfig } from './types.ts'
 import { effectivePharoVm } from './config.ts'
 import { pathExists, resolvePath } from './platform.ts'
-import { describeImage, freePort, launcherLocations, readImageDirectory, resolveVm } from './launcher.ts'
+import { assertUsablePort, describeImage, freePort, launcherLocations, readImageDirectory, resolveVm } from './launcher.ts'
 import type { PharoImage } from './launcher.ts'
 
 export class LiveError extends Error {}
@@ -236,6 +236,7 @@ export async function startImage(
   // A port is free when nothing listens on it; a stale endpoint file for it is
   // simply overwritten by the new server.
   const port = options.port ?? await freePort(4044)
+  assertUsablePort(port)
   const token = randomUUID()
   await ensurePrivateLiveDir()
   const logPath = path.join(liveDir(), 'logs', `${image.name.replace(/[^\w.-]+/g, '_')}.log`)

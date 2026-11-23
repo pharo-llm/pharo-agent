@@ -71,7 +71,15 @@ export type AgentConfig = {
   allowOutsideWorkspace: boolean
   allowPrivateNetwork: boolean
   mcpConfig?: string
+  /** false: no MCP servers at all (chosen during setup). */
+  mcpEnabled?: boolean
   memoryFile?: string
+  /** Start llama.cpp automatically when the model server is down and a GGUF is configured. */
+  autoStartModel: boolean
+  /** Set once setup has run, so the first `pharo-agent` run starts it. */
+  onboarded?: boolean
+  /** Folders the user trusted. Only read from the global config. */
+  trustedFolders?: string[]
 }
 
 export type ToolContext = {

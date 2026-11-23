@@ -209,3 +209,11 @@ test('creates, copies and deletes images like Pharo Launcher', { skip: hasZip ? 
 test('chat commands keep quoted image names together', () => {
   assert.deepEqual(splitArgs('image create "My Image" --template "Pharo 14.0 - 64bit (stable)"'), ['image', 'create', 'My Image', '--template', 'Pharo 14.0 - 64bit (stable)'])
 })
+
+test('never picks a port that fetch refuses to connect to', async () => {
+  const { freePort, assertUsablePort } = await import('../../pharo-agent/launcher.ts')
+  const port = await freePort(4045)
+  assert.notEqual(port, 4045)
+  assert.throws(() => assertUsablePort(4045), /bad port/)
+  assert.doesNotThrow(() => assertUsablePort(4046))
+})

@@ -2,6 +2,15 @@
 
 Pharo Agent is a local coding agent. It can edit files, run shell commands, call MCP tools, and execute code in a Pharo image, so the defaults are intentionally conservative.
 
+## Trusted Folders
+
+On the first run in a folder, pharo-agent asks whether you trust it, the way
+Claude Code does. Only in trusted folders does it use the folder's
+`.pharo-agent.json` (which could switch permissions to `dangerous`) and its
+`.mcp.json` / `.pharo-agent.mcp.json` (which start programs). The list of
+trusted folders is kept only in your global config
+(`~/.config/pharo-agent/config.json`). A project config cannot add itself to it.
+
 ## Permission Modes
 
 - `ask`: default. Read-only tools run automatically; write tools ask for approval in a terminal.

@@ -22,3 +22,11 @@ test('registers the expected local agent tool surface', () => {
     assert.ok(names.includes(name), `${name} should be registered`)
   }
 })
+
+test('repairs double-escaped code from small models, but leaves string literals alone', async () => {
+  const { unescapeModelCode } = await import('../../pharo-agent/tools.ts')
+  assert.equal(unescapeModelCode('deposit: amount\\n\\tbalance := balance + amount'), 'deposit: amount\n\tbalance := balance + amount')
+  assert.equal(unescapeModelCode("printIt\n\t^ 'a\\nb'"), "printIt\n\t^ 'a\\nb'")
+  assert.equal(unescapeModelCode("pattern\\n\t^ 'x\\ty'"), "pattern\n\t^ 'x\\ty'")
+  assert.equal(unescapeModelCode("^ 'only \\n in a string'"), "^ 'only \\n in a string'")
+})

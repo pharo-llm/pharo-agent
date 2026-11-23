@@ -28,7 +28,10 @@ no npm dependencies) and one Smalltalk script that it loads into Pharo images.
 
 ## One turn, end to end
 
+0. **First run only:** `onboarding.ts` asks the setup questions and saves the
+   answers. A folder seen for the first time is asked to be trusted.
 1. **You type a question.** `cli.ts` (chat mode) hands it to `PharoAgentLoop.runTurn`.
+   If the model server is down but a GGUF is configured, llama.cpp is started first.
 2. **The agent loop** (`agent.ts`) sends the conversation, the system prompt and
    the tool schemas to the model (`llm.ts`).
 3. **The model answers** with tool calls, either native `tool_calls` or JSON in
@@ -50,6 +53,7 @@ and run afterwards.
 | Area | Files | Job |
 |---|---|---|
 | Entry and UI | `cli.ts`, `ui.ts` | Commands (`images`, `eval`, `test`, `model`, …), the interactive chat, the banner, rendering of agent activity |
+| Setup | `onboarding.ts`, `prompts.ts` | First-run questions (trust, model, permissions, MCP, image, VM) and the arrow-key menus |
 | Agent | `agent.ts`, `llm.ts`, `permissions.ts` | The tool loop, the model client, approvals (`y` / `n` / `a`lways) |
 | Tools | `tools.ts`, `web-tools.ts`, `mcp.ts` | Everything the model can call |
 | Pharo code | `pharo.ts`, `live.ts`, `smalltalk/live-server.st` | Run Smalltalk live or headless, with the same result shape |
@@ -109,6 +113,9 @@ chat (`/image`), and the agent's `image_*` tools: status, select, start, stop.
   keeps both tools in sync.
 - **No npm dependencies.** Node's built-ins (fetch, test runner, type stripping)
   are enough, so installing is just copying files.
+- **Trust before config.** A project's `.pharo-agent.json` and `.mcp.json` could
+  change permissions or run commands, so they apply only in folders the user
+  trusted. The trust list lives only in the global config.
 - **Everything visible.** The loop emits events for every step, and the UI never
   hides a tool call.
 
@@ -118,7 +125,7 @@ chat (`/image`), and the agent's `image_*` tools: status, select, start, stop.
 pharo-agent/          the CLI (one .ts file per module, see the table above)
   smalltalk/          live-server.st, loaded into images
 docs/                 all documentation (this file, PHARO, MODELS, SECURITY, …)
-scripts/              install.sh, smoke.sh, verify-release.sh
+scripts/              install.sh, install.ps1, smoke.sh, verify-release.sh
 tests/unit/           fast tests: npm test
 tests/e2e/            tests against a real image or model server: npm run test:e2e
 examples/             sample configs (MCP servers, model presets, project config)

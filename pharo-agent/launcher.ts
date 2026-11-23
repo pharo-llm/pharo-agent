@@ -758,10 +758,26 @@ async function findFirst(root: string, extension: string, depth: number): Promis
 // ---------------------------------------------------------------------------
 // Ports
 
-/** First free loopback port from `start`, skipping `taken`. */
+/**
+ * Ports the WHATWG fetch standard refuses to connect to ("bad port"). Node's
+ * fetch fails on them instantly, so a live server there could never be reached.
+ * 4045 (right after our default 4044) is one of them.
+ */
+export const fetchBlockedPorts = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113,
+  115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556,
+  563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6679, 6697, 10080,
+])
+
+export function assertUsablePort(port: number): void {
+  if (fetchBlockedPorts.has(port)) throw new LauncherError(`Port ${port} is blocked by fetch (a "bad port"); choose another one.`)
+}
+
+/** First free loopback port from `start`, skipping `taken` and fetch-blocked ports. */
 export async function freePort(start = 4044, taken: Set<number> = new Set()): Promise<number> {
   for (let port = start; port < start + 200; port += 1) {
-    if (taken.has(port)) continue
+    if (taken.has(port) || fetchBlockedPorts.has(port)) continue
     const free = await new Promise<boolean>(resolve => {
       const server = net.createServer()
       server.once('error', () => resolve(false))

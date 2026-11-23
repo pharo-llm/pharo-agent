@@ -403,3 +403,22 @@ export class ActivityRenderer {
     this.options.verbose = verbose
   }
 }
+
+// ---------------------------------------------------------------------------
+// Download progress (stderr, TTY only)
+
+let progressShown = false
+export function printProgress(event: { label: string; received: number; total?: number }): void {
+  if (!process.stderr.isTTY) return
+  progressShown = true
+  const mb = (bytes: number) => (bytes / 1_048_576).toFixed(1)
+  const percent = event.total ? Math.floor((event.received / event.total) * 100) : undefined
+  const bar = percent === undefined ? '' : `${'█'.repeat(Math.floor(percent / 5))}${'░'.repeat(20 - Math.floor(percent / 5))} ${percent}%`
+  process.stderr.write(`\r\x1b[2K  ↓ ${event.label}  ${bar}  ${mb(event.received)}${event.total ? `/${mb(event.total)}` : ''} MB`)
+}
+
+export function clearProgress(): void {
+  if (progressShown) process.stderr.write('\r\x1b[2K')
+  progressShown = false
+}
+

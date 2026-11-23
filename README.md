@@ -18,38 +18,42 @@ tests. You see every step as it happens.
 
 ## Install
 
-Requires Node.js 22.6 or newer. There are no npm dependencies.
+One line. It installs pharo-agent, puts it on your PATH, and starts setup.
 
 ```sh
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/pharo-llm/pharo-agent/main/scripts/install.sh | sh
 ```
 
-From a checkout, run `node pharo-agent/cli.ts` instead of `pharo-agent`.
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/pharo-llm/pharo-agent/main/scripts/install.ps1 | iex
+```
 
-## Quick Start
+Requires Node.js 22.6 or newer. There are no npm dependencies.
 
-1. **Start a model.** Either use the built-in llama.cpp model:
+## Setup
 
-   ```sh
-   pharo-agent model download qwen-coder-7b --use
-   pharo-agent model serve
-   ```
+Setup asks a few questions, with arrow keys or numbers, the way Claude Code does:
 
-   or point at a server you already run, such as Ollama:
+1. **Trust this folder?** The agent only works in folders you trust.
+2. **Which model?** It finds running Ollama, llama.cpp and LM Studio models, or
+   downloads one and starts it automatically when needed.
+3. **How much to ask?** Approve every change, auto-approve, or read-only.
+4. **MCP or not?** None (the Pharo tools don't need it), your project's
+   `.mcp.json`, or Evref-BL's Pharo MCP (PLexus).
+5. **Which image, and which VM?** Your Pharo Launcher images, or a new one from
+   a template. The matching VM is picked, or downloaded, for you.
 
-   ```sh
-   export PHARO_AGENT_BASE_URL=http://127.0.0.1:11434/v1 PHARO_AGENT_MODEL=qwen3:4b
-   ```
+![First-run setup: trust, model, permissions, MCP, a new Pharo 14 image](docs/images/setup.png)
 
-2. **Open the agent:**
+Everything is saved, so there is nothing to export. Then just run:
 
-   ```sh
-   pharo-agent
-   ```
+```sh
+pharo-agent
+```
 
-3. **Pick or create an image** with `/image`, then just ask.
-
-![Creating an image from a template, starting it, and listing images](docs/images/chat-images.png)
+Run `pharo-agent setup` (or `/setup` in the chat) to change your answers.
 
 ## In The Chat
 

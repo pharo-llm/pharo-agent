@@ -8,9 +8,9 @@ import { AgentInterrupted, PharoAgentLoop } from './agent.ts'
 import { evaluateSmalltalk, inspectImage, runSmalltalkFile, runSUnit } from './pharo.ts'
 import type { PharoEvalResult, PharoRunResult } from './pharo.ts'
 import { liveEndpoint, liveEval, liveHealth, liveLoadSnippet, liveSave, liveServerScriptPath, nextLivePort, samePath, startLiveImage } from './live.ts'
-import { ActivityRenderer, bannerLines, colorEnabled, formatDuration, renderMarkdown, style, tildify } from './ui.ts'
+import { ActivityRenderer, bannerLines, clearProgress, colorEnabled, formatDuration, printProgress, renderMarkdown, style, tildify } from './ui.ts'
 import type { BannerInfo } from './ui.ts'
-import { copyImage, createImage, deleteImage, downloadVm, findImage, findTemplate, launcherLocations, LauncherError, listLauncherImages, listTemplates, listVms, resolveVm, versionLabel, vmVersionFor } from './launcher.ts'
+import { assertUsablePort, copyImage, createImage, deleteImage, downloadVm, findImage, findTemplate, launcherLocations, LauncherError, listLauncherImages, listTemplates, listVms, resolveVm, versionLabel, vmVersionFor } from './launcher.ts'
 import type { LauncherLocations, PharoImage, Template } from './launcher.ts'
 import { describeVersion, imageStatuses, resolveImageRef, selectImage, shortImageName, startPharoImage, stopPharoImage, vmSummary } from './image-manager.ts'
 import type { ImageStatus } from './image-manager.ts'
@@ -24,6 +24,9 @@ import { addTask, clearCompletedTasks, readTasks, updateTask } from './task-stor
 import { collectDiagnostics, diagnosticsOk } from './diagnostics.ts'
 import { discoverSetup } from './setup.ts'
 import { VERSION } from './version.ts'
+import { askTrust, isCwdTrusted, runSetup, SetupDeclined, terminalIo } from './onboarding.ts'
+import type { SetupIo } from './onboarding.ts'
+import { PromptCancelled } from './prompts.ts'
 import { findModelPreset, formatModelPreset, loadModelPresets, modelReference, modelShardFiles, type ModelPreset } from './models.ts'
 
 type CommandFn = (args: string[], global: GlobalOptions) => Promise<number>
@@ -104,7 +107,7 @@ async function askCommand(args: string[], global: GlobalOptions): Promise<number
   if (flags['start-server']) {
     const modelPath = await configuredOrDownloadedModel(config)
     running = await startLlamaServer(config, { modelPath })
-  }
+  } else running = await autoStartModel(config)
   const recorder = flags['no-session'] ? undefined : await createOptionalRecorder(positional.join(' ').slice(0, 80))
   try {
     const prompt = positional.join(' ') || await readStdin()
@@ -138,9 +141,24 @@ async function askCommand(args: string[], global: GlobalOptions): Promise<number
 
 async function chatCommand(args: string[], global: GlobalOptions): Promise<number> {
   const { flags, positional } = parseFlags(args)
+  if (process.stdin.isTTY && process.stdout.isTTY && !flags['no-setup']) {
+    try {
+      const current = await loadConfig({ configPath: global.configPath, cwd: global.cwd })
+      // First run: the whole setup. Later, a folder seen for the first time: just trust.
+      if (!current.onboarded) await runSetup({ cwd: global.cwd, configPath: global.configPath, trust: true, downloadDefaultModel: () => downloadDefaultModel(global) })
+      else if (!await isCwdTrusted(global.cwd, global.configPath ?? globalConfigPath())) await askTrust(global.cwd, terminalIo, global.configPath ?? globalConfigPath())
+    } catch (error) {
+      if (error instanceof SetupDeclined || error instanceof PromptCancelled) {
+        process.stdout.write(style.dim('\nNothing was changed. Run pharo-agent again when you are ready.\n'))
+        return 0
+      }
+      throw error
+    }
+  }
   const config = await runtimeConfig(global, flags)
   let running: Awaited<ReturnType<typeof startLlamaServer>> | undefined
   if (flags['start-server']) running = await startLlamaServer(config, { modelPath: await configuredOrDownloadedModel(config) })
+  else running = await autoStartModel(config)
   const recorder = await createOptionalRecorder(positional.join(' ').slice(0, 80) || 'chat')
   const history: ChatMessage[] = typeof flags.resume === 'string' ? await loadSessionMessages(flags.resume) : []
   const interactive = Boolean(process.stdin.isTTY)
@@ -238,6 +256,18 @@ async function setupCommand(args: string[], global: GlobalOptions): Promise<numb
     permissionMode: config.permissionMode,
   }
 
+  if (process.stdin.isTTY && process.stdout.isTTY && !flags.yes && !flags.local) {
+    try {
+      await runSetup({ cwd: global.cwd, configPath: global.configPath, downloadDefaultModel: () => downloadDefaultModel(global) })
+    } catch (error) {
+      if (error instanceof PromptCancelled || error instanceof SetupDeclined) {
+        process.stdout.write(style.dim('\nSetup cancelled. Nothing more was changed.\n'))
+        return 0
+      }
+      throw error
+    }
+    return 0
+  }
   if (process.stdin.isTTY && !flags.yes) {
     const readline = await import('node:readline/promises')
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
@@ -606,21 +636,6 @@ function printImageTable(statuses: ImageStatus[], locations: LauncherLocations):
   out(style.dim(`\n  ${tildify(locations.imagesDir)} · /image <#> to work in one · /image create · /image start · /image stop\n`))
 }
 
-let progressShown = false
-function printProgress(event: { label: string; received: number; total?: number }): void {
-  if (!process.stderr.isTTY) return
-  progressShown = true
-  const mb = (bytes: number) => (bytes / 1_048_576).toFixed(1)
-  const percent = event.total ? Math.floor((event.received / event.total) * 100) : undefined
-  const bar = percent === undefined ? '' : `${'█'.repeat(Math.floor(percent / 5))}${'░'.repeat(20 - Math.floor(percent / 5))} ${percent}%`
-  process.stderr.write(`\r\x1b[2K  ↓ ${event.label}  ${bar}  ${mb(event.received)}${event.total ? `/${mb(event.total)}` : ''} MB`)
-}
-
-function clearProgress(): void {
-  if (progressShown) process.stderr.write('\r\x1b[2K')
-  progressShown = false
-}
-
 /** Split a chat command line, keeping "quoted words" together. */
 export function splitArgs(line: string): string[] {
   const args: string[] = []
@@ -628,6 +643,29 @@ export function splitArgs(line: string): string[] {
   let match: RegExpExecArray | null
   while ((match = pattern.exec(line))) args.push(match[1] ?? match[2] ?? match[3]!)
   return args
+}
+
+/** Download the default GGUF (used by setup's "download a model" choice). */
+async function downloadDefaultModel(global: GlobalOptions): Promise<void> {
+  await modelCommand(['download', 'qwen-coder-7b', '--use'], global)
+}
+
+/**
+ * If the model server is down but a GGUF and llama.cpp are configured, start
+ * the server for this session, so nobody has to run `model serve` by hand.
+ */
+async function autoStartModel(config: AgentConfig): Promise<Awaited<ReturnType<typeof startLlamaServer>> | undefined> {
+  if (!config.autoStartModel || !config.modelPath) return undefined
+  const reachable = await fetch(`${config.baseUrl.replace(/\/$/, '')}/models`, { signal: AbortSignal.timeout(1_500) }).then(response => response.ok).catch(() => false)
+  if (reachable || !await pathExists(config.modelPath)) return undefined
+  if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(config.baseUrl)) return undefined
+  process.stderr.write(style.dim(`Starting llama.cpp with ${path.basename(config.modelPath)}…\n`))
+  try {
+    return await startLlamaServer(config, { modelPath: config.modelPath, waitSeconds: 180 })
+  } catch (error) {
+    process.stderr.write(`${style.yellow('!')} Could not start llama.cpp: ${(error as Error).message}\n`)
+    return undefined
+  }
 }
 
 async function liveCommand(args: string[], global: GlobalOptions, sessionConfig?: AgentConfig): Promise<number> {
@@ -648,6 +686,7 @@ async function liveCommand(args: string[], global: GlobalOptions, sessionConfig?
   }
   if (sub === 'snippet') {
     const port = flags.port ? Number(flags.port) : await nextLivePort()
+    assertUsablePort(port)
     process.stdout.write(`${liveLoadSnippet(port)}\n`)
     if (!flags.quiet) process.stderr.write(style.dim(`\nPaste it into a Playground of your open image and Do it (Cmd+D).\nThe server listens on 127.0.0.1:${port} and writes its token to ~/.pharo-agent/endpoints/${port}.json.\nThen select that image (/image) so questions go to it.\nServer source: ${liveServerScriptPath()}\n`))
     return 0
@@ -1279,7 +1318,31 @@ async function handleChatSlash(prompt: string, global: GlobalOptions, state: Cha
   if (command === 'live') return await liveCommand(rest.length ? rest : ['status'], global, state.config).then(() => true)
   if (command === 'save') return await liveCommand(['save'], global, state.config).then(() => true)
   if (command === 'sessions') return await sessionsCommand(rest.length ? rest : ['list']).then(() => true)
-  if (command === 'setup') return await setupCommand(rest, global).then(() => true)
+  if (command === 'setup') {
+    if (!state.rl) return await setupCommand(rest, global).then(() => true)
+    const rl = state.rl
+    const io: SetupIo = {
+      write: text => process.stdout.write(text),
+      ask: async (question, fallback) => (await rl.question(`${question}${fallback ? style.dim(` [${fallback}]`) : ''}: `)).trim() || (fallback ?? ''),
+      select: async (title, choices, initial = 0) => {
+        process.stdout.write(`${style.bold(title)}\n`)
+        choices.forEach((choice, i) => process.stdout.write(`  ${style.cyan(String(i + 1))}. ${choice.label}${choice.hint ? style.dim(`  ${choice.hint}`) : ''}\n`))
+        const answer = Number((await rl.question(`  Choose 1-${choices.length} ${style.dim(`[${initial + 1}]`)}: `)).trim() || initial + 1)
+        return (choices[answer - 1] ?? choices[initial]!).value
+      },
+    }
+    state.asking = true
+    try {
+      const next = await runSetup({ cwd: global.cwd, configPath: global.configPath, io, downloadDefaultModel: () => downloadDefaultModel(global) })
+      Object.assign(state.config, next)
+      state.loop = new PharoAgentLoop(state.config)
+    } catch (error) {
+      process.stdout.write(`${style.red('error:')} ${(error as Error).message}\n`)
+    } finally {
+      state.asking = false
+    }
+    return true
+  }
   if (command === 'status') return await statusCommand(rest, global).then(() => true)
   if (command === 'doctor') return await doctorCommand(rest, global).then(() => true)
   if (command === 'tools') return await toolsCommand(rest, global).then(() => true)

@@ -48,8 +48,35 @@ EOF
 chmod +x "$WRAPPER"
 
 echo "pharo-agent installed to $WRAPPER"
+
+# Put the bin directory on PATH for new shells, so nothing has to be exported
+# by hand. Set PHARO_AGENT_NO_MODIFY_PATH=1 to skip.
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) echo "Add $BIN_DIR to PATH to run pharo-agent from any terminal." ;;
+  *)
+    if [ -z "${PHARO_AGENT_NO_MODIFY_PATH:-}" ]; then
+      case "${SHELL:-}" in
+        */zsh) RC="$HOME/.zshrc" ;;
+        */bash) if [ "$(uname -s)" = "Darwin" ]; then RC="$HOME/.bash_profile"; else RC="$HOME/.bashrc"; fi ;;
+        *) RC="$HOME/.profile" ;;
+      esac
+      LINE="export PATH=\"$BIN_DIR:\$PATH\"  # pharo-agent"
+      if ! grep -qs "# pharo-agent" "$RC"; then
+        printf '\n%s\n' "$LINE" >> "$RC"
+        echo "Added $BIN_DIR to PATH in $RC (new terminals will have it)."
+      fi
+    else
+      echo "Add $BIN_DIR to PATH to run pharo-agent from any terminal."
+    fi
+    ;;
 esac
-echo "Run: pharo-agent doctor"
+
+# First-run setup right away when there is a terminal to ask in. With
+# curl | sh, stdin is the script itself, so read answers from /dev/tty.
+if [ -z "${PHARO_AGENT_NO_SETUP:-}" ] && [ -z "${CI:-}" ] && (exec </dev/tty) 2>/dev/null; then
+  echo ""
+  "$WRAPPER" setup </dev/tty || true
+  echo "Run pharo-agent to start (in a new terminal if PATH was just updated)."
+else
+  echo "Run: pharo-agent    (first run asks a few setup questions)"
+fi

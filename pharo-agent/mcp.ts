@@ -15,10 +15,23 @@ export type McpConfig = {
   mcpServers?: Record<string, McpServerConfig>
 }
 
+/** Project MCP files, in order: ours, then the common .mcp.json (as Claude Code uses). */
+export const projectMcpFiles = ['.pharo-agent.mcp.json', '.mcp.json']
+
+/** Reads `mcpServers` (the usual key) or `servers`. */
+export async function readMcpFile(file: string): Promise<McpConfig> {
+  const data = JSON.parse(await readFile(file, 'utf8')) as { mcpServers?: McpConfig['mcpServers']; servers?: McpConfig['mcpServers'] }
+  return { mcpServers: data.mcpServers ?? data.servers ?? {} }
+}
+
 export async function loadMcpConfig(config: AgentConfig, cwd = process.cwd()): Promise<McpConfig> {
-  const file = config.mcpConfig ?? path.join(cwd, '.pharo-agent.mcp.json')
-  if (!await pathExists(file)) return {}
-  return JSON.parse(await readFile(file, 'utf8')) as McpConfig
+  if (config.mcpEnabled === false) return {}
+  if (config.mcpConfig) return await pathExists(config.mcpConfig) ? readMcpFile(config.mcpConfig) : {}
+  for (const name of projectMcpFiles) {
+    const file = path.join(cwd, name)
+    if (await pathExists(file)) return readMcpFile(file)
+  }
+  return {}
 }
 
 export async function listMcpTools(config: AgentConfig, cwd = process.cwd()): Promise<ToolDefinition[]> {

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- First-run setup, Claude Code style: trust the folder, then pick the model
+  (finds Ollama / llama.cpp / LM Studio), permissions, MCP (off, project
+  `.mcp.json`, or Evref-BL PLexus), image and VM. Arrow-key menus. Runs from the
+  installer or on the first `pharo-agent`, and again with `setup` / `/setup`.
+- Installers put pharo-agent on PATH and start setup: `scripts/install.sh`
+  (macOS/Linux, answers via `/dev/tty`) and new `scripts/install.ps1` (Windows).
+- llama.cpp starts automatically when the chat needs a configured GGUF model.
+- A project's `.pharo-agent.json` and MCP files only apply in trusted folders.
+  `.mcp.json` is read, and both `mcpServers` and `servers` keys are accepted.
+- Never use ports that fetch refuses (4045, 4190, …). Before this fix, a second
+  live image on 4045 could never be reached.
+- Double-escaped code from small models (`\\n` instead of a line break) is
+  repaired before compiling.
+- Repository: docs in `docs/` (new ARCHITECTURE.md, CHANGELOG.md moved there),
+  scripts in `scripts/`, tests in `tests/unit` and `tests/e2e`.
+
 - `pharo_define_class` refuses to replace a class that already exists in
   another package (for example `Stack`). Redefining it broke the image.
   `replaceExisting: true` overrides this, only when asked.
