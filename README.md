@@ -4,8 +4,6 @@ A local coding agent for Pharo, in your terminal. Ask questions and it works
 directly inside your Pharo image: it browses classes, writes methods, and runs
 tests. You see every step as it happens.
 
-![The agent building a class and its test inside a live Pharo image](docs/images/chat-agent.png)
-
 - **Works inside your running image.** No MCP: a tiny server loads into the
   image, so changes stay and calls take milliseconds.
 - **Manages your images like Pharo Launcher.** It uses the same images, VMs and
