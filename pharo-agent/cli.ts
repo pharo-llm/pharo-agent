@@ -1553,7 +1553,11 @@ async function chatPrompt(config: AgentConfig): Promise<string> {
 function trimChatHistory(messages: ChatMessage[], maxMessages = 40): ChatMessage[] {
   const system = messages.find(message => message.role === 'system')
   const rest = messages.filter(message => message.role !== 'system')
-  const trimmed = rest.slice(Math.max(0, rest.length - maxMessages))
+  let start = Math.max(0, rest.length - maxMessages)
+  // Start on a user message: a tool result cut off from its call is rejected
+  // by chat servers, and a call without its result confuses the model.
+  while (start > 0 && start < rest.length && rest[start]!.role !== 'user') start -= 1
+  const trimmed = rest.slice(start)
   return system ? [system, ...trimmed] : trimmed
 }
 

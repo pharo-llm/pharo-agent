@@ -6,11 +6,24 @@ export type JsonObject = { [key: string]: JsonValue }
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
 
+/** A tool call as the OpenAI chat API carries it on an assistant message. */
+export type NativeToolCall = {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+
+/**
+ * History is always kept in the native shape (assistant `tool_calls`, then one
+ * `tool` message per call). The client rewrites it as plain text for models
+ * that cannot take native tools.
+ */
 export type ChatMessage = {
   role: ChatRole
   content: string
   name?: string
   tool_call_id?: string
+  tool_calls?: NativeToolCall[]
 }
 
 export type ToolSchema = {

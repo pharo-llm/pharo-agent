@@ -1,4 +1,5 @@
 import type { ChatMessage, JsonObject, ToolCall, ToolDefinition } from './types.ts'
+import { parseJsonLenient, toNativeMessages, toTextMessages } from './tool-calls.ts'
 
 export class LlmError extends Error {
   status?: number
@@ -61,17 +62,23 @@ export class OpenAICompatibleClient {
     maxTokens?: number
     signal?: AbortSignal
   }): Promise<ChatResponse> {
+    const tools = options.tools ?? []
     const body: JsonObject = {
       model: options.model,
-      messages: options.messages as unknown as JsonObject[],
       temperature: options.temperature ?? 0.2,
       stream: false,
     }
     if (options.maxTokens) body.max_tokens = options.maxTokens
-    // Models without a tool template (common for GGUF fine-tunes) use the JSON
-    // tool protocol from the system prompt instead.
-    if (options.tools?.length && !this.noNativeTools.has(options.model)) {
-      body.tools = options.tools.map(tool => ({
+    // Models without a tool template (common for GGUF fine-tunes) get the tools
+    // as a text protocol in the system prompt, and their history as plain text.
+    const useText = () => {
+      body.messages = toTextMessages(options.messages, tools) as unknown as JsonObject[]
+      delete body.tools
+      delete body.tool_choice
+    }
+    if (tools.length && !this.noNativeTools.has(options.model)) {
+      body.messages = toNativeMessages(options.messages) as unknown as JsonObject[]
+      body.tools = tools.map(tool => ({
         type: 'function',
         function: {
           name: tool.name,
@@ -80,15 +87,14 @@ export class OpenAICompatibleClient {
         },
       })) as unknown as JsonObject[]
       body.tool_choice = 'auto'
-    }
+    } else useText()
     let data: { choices?: { message?: { content?: unknown; tool_calls?: unknown[] } }[] }
     try {
       data = await this.request('POST', '/chat/completions', body, options.signal)
     } catch (error) {
       if (body.tools && error instanceof LlmError && /(does not|doesn't) support tools|tools? (is|are) not supported|tool_choice/i.test(error.message)) {
         this.noNativeTools.add(options.model)
-        delete body.tools
-        delete body.tool_choice
+        useText()
         data = await this.request('POST', '/chat/completions', body, options.signal)
       } else throw error
     }
@@ -163,12 +169,8 @@ function parseNativeToolCalls(raw: unknown[] | undefined): ToolCall[] {
     let args: JsonObject = {}
     const rawArgs = record.function?.arguments
     if (typeof rawArgs === 'string') {
-      try {
-        const parsed = JSON.parse(rawArgs)
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed
-      } catch {
-        args = {}
-      }
+      const parsed = parseJsonLenient(rawArgs)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as JsonObject
     } else if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
       args = rawArgs as JsonObject
     }
